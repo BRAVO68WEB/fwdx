@@ -1,5 +1,12 @@
 package tunnel
 
+// Client-side tunnel definitions and lifecycle. Tunnel config (name, hostname, local URL)
+// is stored only on the client in ~/.fwdx/tunnels/<name>.json. The server does not
+// persist tunnel definitions; it only holds active connections in memory (see
+// internal/server/registry.go). When you run "fwdx tunnel start", the client
+// connects over gRPC and keeps a bidirectional stream; the server's Registry
+// maps hostname -> that connection until the client disconnects.
+
 import (
 	"context"
 	"encoding/json"
@@ -179,11 +186,11 @@ func (m *Manager) Start(name string, watch, debug bool) error {
 			m.mu.Unlock()
 			cancel()
 		}()
-		return ClientConnector(ctx, tunnelURL, cfg.Token, t.Hostname, localURL, debug)
+		return Connect(ctx, tunnelURL, cfg.Token, t.Hostname, localURL, debug)
 	}
 
 	go func() {
-		_ = ClientConnector(ctx, tunnelURL, cfg.Token, t.Hostname, localURL, debug)
+		_ = Connect(ctx, tunnelURL, cfg.Token, t.Hostname, localURL, debug)
 		m.mu.Lock()
 		delete(m.running, name)
 		m.mu.Unlock()

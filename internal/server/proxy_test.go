@@ -66,16 +66,19 @@ func TestProxyHandler_ServerHostname_InfoPage(t *testing.T) {
 	}
 }
 
+// blockingConn blocks in EnqueueRequest until context is done, then returns (nil, true).
+type blockingConn struct{}
+
+func (b *blockingConn) EnqueueRequest(ctx context.Context, _ *ProxyRequest) (*ProxyResponse, bool) {
+	<-ctx.Done()
+	return nil, true
+}
+func (b *blockingConn) GetRemoteAddr() string { return "127.0.0.1" }
+func (b *blockingConn) Close()                {}
+
 func TestProxyHandler_WithTunnel_NoResponse(t *testing.T) {
 	reg := NewRegistry()
-	conn := &TunnelConn{
-		Hostname:     "app.example.com",
-		LocalURL:     "http://localhost:8080",
-		RemoteAddr:   "127.0.0.1",
-		requestQueue: make(chan *ProxyRequest, 1),
-		pending:      make(map[string]chan *ProxyResponse),
-	}
-	reg.Register("app.example.com", conn)
+	reg.Register("app.example.com", &blockingConn{})
 
 	handler := ProxyHandler(reg, "tunnel.example.com")
 	req := httptest.NewRequest(http.MethodGet, "https://app.example.com/", nil)
@@ -97,12 +100,7 @@ func TestProxyHandler_WithTunnel_NoResponse(t *testing.T) {
 
 func TestProxyHandler_HostWithPort(t *testing.T) {
 	reg := NewRegistry()
-	conn := &TunnelConn{
-		Hostname:     "app.example.com",
-		requestQueue: make(chan *ProxyRequest, 1),
-		pending:      make(map[string]chan *ProxyResponse),
-	}
-	reg.Register("app.example.com", conn)
+	reg.Register("app.example.com", &blockingConn{})
 
 	handler := ProxyHandler(reg, "tunnel.example.com")
 	req := httptest.NewRequest(http.MethodGet, "https://app.example.com/", nil)

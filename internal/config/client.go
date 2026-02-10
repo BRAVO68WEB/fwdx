@@ -33,6 +33,11 @@ func LoadClientConfig() (*ClientConfig, error) {
 	if cfg.Token == "" {
 		cfg.Token = os.Getenv("FWDX_TOKEN")
 	}
+	if v := os.Getenv("FWDX_TUNNEL_PORT"); v != "" {
+		if p, err := strconv.Atoi(v); err == nil {
+			cfg.TunnelPort = p // 0 = use port from ServerURL (e.g. 443 behind nginx)
+		}
+	}
 	if cfg.ServerHostname == "" && cfg.ServerURL != "" {
 		u, err := url.Parse(cfg.ServerURL)
 		if err == nil {

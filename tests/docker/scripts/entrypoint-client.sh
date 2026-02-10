@@ -1,7 +1,7 @@
 #!/bin/sh
 set -e
-# Wait for server to be up
-until wget -q -O /dev/null --no-check-certificate https://server:4443/ 2>/dev/null || true; do
+# Wait for server web (and gRPC) to be up via admin endpoint
+until wget -q -O /dev/null --no-check-certificate --header="Authorization: Bearer e2e-docker-admin" https://server:443/admin/info 2>/dev/null; do
   sleep 1
 done
 sleep 2

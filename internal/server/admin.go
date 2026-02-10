@@ -22,10 +22,12 @@ func AdminRouter(adminToken, hostname string, registry *Registry, domains *Domai
 			list := registry.List()
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(list)
+			return
 		case r.Method == http.MethodGet && r.URL.Path == "/admin/domains":
 			list := domains.List()
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(list)
+			return
 		case r.Method == http.MethodPost && r.URL.Path == "/admin/domains":
 			var body struct {
 				Domain string `json:"domain"`
@@ -45,6 +47,7 @@ func AdminRouter(adminToken, hostname string, registry *Registry, domains *Domai
 			}
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok", "domain": body.Domain})
+			return
 		case r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/admin/domains/"):
 			domain := strings.TrimPrefix(r.URL.Path, "/admin/domains/")
 			domain = strings.TrimSpace(strings.ToLower(domain))
@@ -57,6 +60,7 @@ func AdminRouter(adminToken, hostname string, registry *Registry, domains *Domai
 				return
 			}
 			w.WriteHeader(http.StatusNoContent)
+			return
 		default:
 			http.NotFound(w, r)
 		}

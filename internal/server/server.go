@@ -3,18 +3,19 @@ package server
 import (
 	"crypto/tls"
 	"fmt"
+	"net"
 	"net/http"
 	"sync"
 )
 
 // Config holds server configuration.
-// For TLS: set TLSCertFile and TLSKeyFile; HTTPSPort and TunnelPort (if equal, single port).
-// For behind reverse proxy: set HTTPPort only; TLS is terminated by the proxy.
+// Web: HTTP/HTTPS (public traffic). Grpc: tunnel connections (gRPC).
+// Behind nginx: no TLS, nginx forwards 443 -> WebPort and gRPC stream -> GrpcPort.
+// Direct: set TLSCertFile/TLSKeyFile; both Web and Grpc use TLS.
 type Config struct {
 	Hostname    string
-	HTTPSPort   int
-	TunnelPort  int
-	HTTPPort    int   // if non-zero, listen HTTP only on this port (single port; use behind nginx)
+	WebPort     int    // HTTP/HTTPS for public and admin (e.g. 8080 behind nginx, 443 direct)
+	GrpcPort    int    // gRPC for tunnel client connections (e.g. 4440 behind nginx, 4443 direct)
 	ClientToken string
 	AdminToken  string
 	TLSCertFile string
@@ -22,18 +23,17 @@ type Config struct {
 	DataDir     string
 }
 
-// Server runs the fwdx tunneling server.
+// Server runs the fwdx server: web (proxy + admin) and gRPC (tunnels).
 type Server struct {
 	cfg      Config
 	registry *Registry
 	domains  *DomainStore
 
-	tunnelHandler http.Handler
-	proxyHandler  http.Handler
+	proxyHandler http.Handler
 
-	httpsServer  *http.Server
-	tunnelServer *http.Server
-	mu           sync.Mutex
+	webServer  *http.Server
+	grpcListener net.Listener
+	mu         sync.Mutex
 }
 
 // New creates a new Server.
@@ -51,80 +51,74 @@ func New(cfg Config) (*Server, error) {
 	registry := NewRegistry()
 	domains := NewDomainStore(cfg.DataDir)
 
-	s := &Server{
+	return &Server{
 		cfg:      cfg,
 		registry: registry,
 		domains:  domains,
-		tunnelHandler: TunnelHandler(registry, cfg.ClientToken, domains.List, cfg.Hostname),
-		proxyHandler:  ProxyHandler(registry, cfg.Hostname),
-	}
-	return s, nil
+		proxyHandler: ProxyHandler(registry, cfg.Hostname),
+	}, nil
 }
 
-// Run starts the server. Single port (HTTP or HTTPS) or dual port (HTTPS + tunnel).
+// Run starts web and gRPC listeners. Use TLS on both if certs are set.
 func (s *Server) Run() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	mux := http.NewServeMux()
-	mux.HandleFunc(pathRegister, s.tunnelHandler.ServeHTTP)
-	mux.HandleFunc(pathTunnelNext, s.tunnelHandler.ServeHTTP)
-	mux.HandleFunc(pathTunnelResponse, s.tunnelHandler.ServeHTTP)
 	mux.Handle("/admin/", AdminRouter(s.cfg.AdminToken, s.cfg.Hostname, s.registry, s.domains))
 	mux.Handle("/", s.proxyHandler)
 
-	// Behind reverse proxy: single HTTP port (no TLS)
-	if s.cfg.HTTPPort != 0 {
-		s.httpsServer = &http.Server{Addr: fmt.Sprintf(":%d", s.cfg.HTTPPort), Handler: mux}
-		return s.httpsServer.ListenAndServe()
+	useTLS := s.cfg.TLSCertFile != "" && s.cfg.TLSKeyFile != ""
+
+	s.webServer = &http.Server{
+		Addr:    fmt.Sprintf(":%d", s.cfg.WebPort),
+		Handler: mux,
+	}
+	if useTLS {
+		tlsConfig, err := s.loadTLS()
+		if err != nil {
+			return err
+		}
+		s.webServer.TLSConfig = tlsConfig
 	}
 
-	tlsConfig, err := s.loadTLS()
+	grpcLn, err := net.Listen("tcp", fmt.Sprintf(":%d", s.cfg.GrpcPort))
 	if err != nil {
 		return err
 	}
-
-	s.httpsServer = &http.Server{
-		Addr:      fmt.Sprintf(":%d", s.cfg.HTTPSPort),
-		Handler:   mux,
-		TLSConfig: tlsConfig,
-	}
-
-	// Single TLS port: same port for public and tunnel API
-	if s.cfg.HTTPSPort == s.cfg.TunnelPort {
-		return s.httpsServer.ListenAndServeTLS(s.cfg.TLSCertFile, s.cfg.TLSKeyFile)
-	}
-
-	s.tunnelServer = &http.Server{
-		Addr:      fmt.Sprintf(":%d", s.cfg.TunnelPort),
-		Handler:   s.tunnelHandler,
-		TLSConfig: tlsConfig,
-	}
+	s.grpcListener = grpcLn
 
 	var wg sync.WaitGroup
 	var runErr error
+
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		if err := s.httpsServer.ListenAndServeTLS(s.cfg.TLSCertFile, s.cfg.TLSKeyFile); err != nil && err != http.ErrServerClosed {
-			runErr = err
+		if useTLS {
+			runErr = firstErr(runErr, s.webServer.ListenAndServeTLS(s.cfg.TLSCertFile, s.cfg.TLSKeyFile))
+		} else {
+			runErr = firstErr(runErr, s.webServer.ListenAndServe())
 		}
 	}()
+
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		if err := s.tunnelServer.ListenAndServeTLS(s.cfg.TLSCertFile, s.cfg.TLSKeyFile); err != nil && err != http.ErrServerClosed {
-			runErr = err
-		}
+		runErr = firstErr(runErr, RunGrpcServer(grpcLn, s.registry, s.cfg.ClientToken, s.domains.List, s.cfg.Hostname, useTLS, s.cfg.TLSCertFile, s.cfg.TLSKeyFile))
 	}()
+
 	wg.Wait()
 	return runErr
 }
 
-func (s *Server) loadTLS() (*tls.Config, error) {
-	if s.cfg.TLSCertFile == "" || s.cfg.TLSKeyFile == "" {
-		return nil, fmt.Errorf("tls-cert and tls-key are required (or use --http-port when behind a reverse proxy)")
+func firstErr(prev, err error) error {
+	if err != nil && err != http.ErrServerClosed {
+		return err
 	}
+	return prev
+}
+
+func (s *Server) loadTLS() (*tls.Config, error) {
 	cert, err := tls.LoadX509KeyPair(s.cfg.TLSCertFile, s.cfg.TLSKeyFile)
 	if err != nil {
 		return nil, fmt.Errorf("load TLS: %w", err)
@@ -132,8 +126,5 @@ func (s *Server) loadTLS() (*tls.Config, error) {
 	return &tls.Config{Certificates: []tls.Certificate{cert}}, nil
 }
 
-// Registry returns the tunnel registry (for admin list).
-func (s *Server) Registry() *Registry { return s.registry }
-
-// Domains returns the domain store.
+func (s *Server) Registry() *Registry   { return s.registry }
 func (s *Server) Domains() *DomainStore { return s.domains }

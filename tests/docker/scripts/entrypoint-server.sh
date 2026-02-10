@@ -15,6 +15,6 @@ exec fwdx serve \
   --admin-token e2e-docker-admin \
   --tls-cert "$CERT_DIR/cert.pem" \
   --tls-key "$CERT_DIR/key.pem" \
-  --https-port 443 \
-  --tunnel-port 4443 \
+  --web-port 443 \
+  --grpc-port 4443 \
   --data-dir /tmp/data

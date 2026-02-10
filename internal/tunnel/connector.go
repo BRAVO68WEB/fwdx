@@ -1,173 +1,138 @@
 package tunnel
 
 import (
-	"bytes"
 	"context"
 	"crypto/tls"
-	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"os"
 	"strings"
-	"time"
+
+	tunnelv1 "github.com/BRAVO68WEB/fwdx/api/tunnel/v1"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/metadata"
 )
 
-// ClientConnector runs the tunnel client: register with server, then long-poll for requests and proxy to local.
-func ClientConnector(ctx context.Context, tunnelURL, token, hostname, localURL string, debug bool) error {
+// Connect runs the tunnel client over gRPC: register, then receive ProxyRequests and send ProxyResponses.
+// tunnelURL is the gRPC endpoint (e.g. https://tunnel.example.com:4443). Token is sent in gRPC metadata.
+func Connect(ctx context.Context, tunnelURL, token, hostname, localURL string, debug bool) error {
 	tunnelURL = strings.TrimSuffix(tunnelURL, "/")
-	base, err := url.Parse(tunnelURL)
+	u, err := url.Parse(tunnelURL)
 	if err != nil {
 		return fmt.Errorf("tunnel URL: %w", err)
 	}
-
-	transport := &http.Transport{}
-	if s := os.Getenv("FWDX_INSECURE_SKIP_VERIFY"); s == "1" || strings.EqualFold(s, "true") {
-		transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
+	host := u.Hostname()
+	port := u.Port()
+	if port == "" {
+		if u.Scheme == "https" {
+			port = "443"
+		} else {
+			port = "4443"
+		}
 	}
-	client := &http.Client{Timeout: 0, Transport: transport}
+	target := host + ":" + port
 
-	// Register
-	regURL := base.ResolveReference(&url.URL{Path: "/register"}).String()
-	regBody, _ := json.Marshal(map[string]string{"hostname": hostname, "local": localURL})
-	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, regURL, bytes.NewReader(regBody))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+token)
-	resp, err := client.Do(req)
+	opts := []grpc.DialOption{}
+	if u.Scheme == "https" {
+		tlsCfg := &tls.Config{}
+		if s := os.Getenv("FWDX_INSECURE_SKIP_VERIFY"); s == "1" || strings.EqualFold(s, "true") {
+			tlsCfg.InsecureSkipVerify = true
+		}
+		opts = append(opts, grpc.WithTransportCredentials(credentials.NewTLS(tlsCfg)))
+	} else {
+		opts = append(opts, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	}
+	conn, err := grpc.NewClient(target, opts...)
 	if err != nil {
-		return fmt.Errorf("register: %w", err)
+		return fmt.Errorf("grpc dial: %w", err)
 	}
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("register: %s", resp.Status)
+	defer conn.Close()
+
+	client := tunnelv1.NewTunnelServiceClient(conn)
+	md := metadata.Pairs("authorization", "Bearer "+token)
+	streamCtx := metadata.NewOutgoingContext(ctx, md)
+	stream, err := client.Connect(streamCtx)
+	if err != nil {
+		return fmt.Errorf("connect: %w", err)
+	}
+
+	// First message: Register
+	if err := stream.Send(&tunnelv1.ClientMessage{
+		Message: &tunnelv1.ClientMessage_Register{
+			Register: &tunnelv1.Register{
+				Hostname: hostname,
+				LocalUrl: localURL,
+			},
+		},
+	}); err != nil {
+		return fmt.Errorf("send register: %w", err)
+	}
+
+	msg, err := stream.Recv()
+	if err != nil {
+		return fmt.Errorf("recv register ack: %w", err)
+	}
+	ack := msg.GetRegisterAck()
+	if ack == nil || !ack.Ok {
+		errStr := "registration failed"
+		if ack != nil && ack.Error != "" {
+			errStr = ack.Error
+		}
+		return fmt.Errorf("register: %s", errStr)
 	}
 
 	if debug {
-		fmt.Printf("Registered %s -> %s\n", hostname, localURL)
+		fmt.Printf("tunnel registered %s -> %s\n", hostname, localURL)
 	}
 
-	// Long-poll loop: GET /tunnel/next-request, proxy to local, POST /tunnel/response
-	nextURL := base.ResolveReference(&url.URL{Path: "/tunnel/next-request", RawQuery: "hostname=" + url.QueryEscape(hostname)}).String()
-	responseURL := base.ResolveReference(&url.URL{Path: "/tunnel/response", RawQuery: "hostname=" + url.QueryEscape(hostname)}).String()
-
+	// Loop: receive ProxyRequest, proxy to local, send ProxyResponse
 	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-		}
-
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, nextURL, nil)
+		msg, err := stream.Recv()
 		if err != nil {
 			return err
 		}
-		req.Header.Set("Authorization", "Bearer "+token)
-		req.Header.Set("X-Tunnel-Hostname", hostname)
+		preq := msg.GetProxyRequest()
+		if preq == nil {
+			continue
+		}
 
-		resp, err := client.Do(req)
-		if err != nil {
-			if ctx.Err() != nil {
-				return ctx.Err()
+		pr := &ProxyReq{
+			ID:     preq.Id,
+			Method: preq.Method,
+			Path:   preq.Path,
+			Query:  preq.Query,
+			Header: make(http.Header),
+			Body:   preq.Body,
+		}
+		for k, v := range preq.Headers {
+			pr.Header.Set(k, v)
+		}
+
+		resp := ProxyToLocal(localURL, pr)
+		if resp == nil {
+			resp = &ProxyResp{ID: pr.ID, Status: 502, Body: []byte("bad gateway")}
+		}
+
+		headers := make(map[string]string)
+		for k, vv := range resp.Header {
+			if len(vv) > 0 {
+				headers[k] = strings.Join(vv, ", ")
 			}
-			time.Sleep(2 * time.Second)
-			continue
 		}
-
-		if resp.StatusCode != http.StatusOK {
-			resp.Body.Close()
-			if resp.StatusCode == http.StatusGone {
-				return fmt.Errorf("tunnel closed by server")
-			}
-			time.Sleep(2 * time.Second)
-			continue
+		if err := stream.Send(&tunnelv1.ClientMessage{
+			Message: &tunnelv1.ClientMessage_ProxyResponse{
+				ProxyResponse: &tunnelv1.ProxyResponse{
+					Id:      resp.ID,
+					Status:  int32(resp.Status),
+					Headers: headers,
+					Body:    resp.Body,
+				},
+			},
+		}); err != nil {
+			return err
 		}
-
-		var proxyReq struct {
-			ID     string
-			Method string
-			Path   string
-			Query  string
-			Header http.Header
-			Body   []byte
-		}
-		if err := json.NewDecoder(resp.Body).Decode(&proxyReq); err != nil {
-			resp.Body.Close()
-			continue
-		}
-		resp.Body.Close()
-
-		// Proxy to local
-		proxyResp := proxyToLocal(localURL, &proxyReq)
-		if proxyResp == nil {
-			proxyResp = &struct {
-				ID     string
-				Status int
-				Header http.Header
-				Body   []byte
-			}{ID: proxyReq.ID, Status: 502, Body: []byte("bad gateway")}
-		}
-
-		// Send response back to server
-		respBody, _ := json.Marshal(proxyResp)
-		req2, _ := http.NewRequestWithContext(ctx, http.MethodPost, responseURL, bytes.NewReader(respBody))
-		req2.Header.Set("Content-Type", "application/json")
-		req2.Header.Set("Authorization", "Bearer "+token)
-		req2.Header.Set("X-Tunnel-Hostname", hostname)
-		if res, err := client.Do(req2); err == nil {
-			res.Body.Close()
-		}
-	}
-}
-
-func proxyToLocal(localURL string, pr *struct {
-	ID     string
-	Method string
-	Path   string
-	Query  string
-	Header http.Header
-	Body   []byte
-}) *struct {
-	ID     string
-	Status int
-	Header http.Header
-	Body   []byte
-} {
-	target := localURL + pr.Path
-	if pr.Query != "" {
-		target += "?" + pr.Query
-	}
-	body := bytes.NewReader(pr.Body)
-	req, err := http.NewRequest(pr.Method, target, body)
-	if err != nil {
-		return nil
-	}
-	for k, vv := range pr.Header {
-		for _, v := range vv {
-			req.Header.Add(k, v)
-		}
-	}
-	// Avoid forwarding Hop-by-hop and tunnel headers
-	req.Header.Del("Connection")
-	req.Header.Del("X-Tunnel-Hostname")
-
-	client := &http.Client{Timeout: 60 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil
-	}
-	defer resp.Body.Close()
-
-	outBody, _ := io.ReadAll(resp.Body)
-	return &struct {
-		ID     string
-		Status int
-		Header http.Header
-		Body   []byte
-	}{
-		ID:     pr.ID,
-		Status: resp.StatusCode,
-		Header: resp.Header.Clone(),
-		Body:   outBody,
 	}
 }
