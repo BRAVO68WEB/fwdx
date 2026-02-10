@@ -2,6 +2,13 @@
 
 This guide walks you through running your own fwdx tunneling server so you can expose local apps via HTTPS (e.g. `myapp.yourserver.com` → your laptop).
 
+**Architecture:** The server has two listeners:
+
+- **Web port** – HTTP/HTTPS for public traffic (proxy) and admin API.
+- **gRPC port** – Tunnel connections (clients open a bidirectional gRPC stream here).
+
+Nginx in front terminates TLS and forwards **443** → web and **4443** (gRPC stream) → grpc.
+
 ---
 
 ## 1. Prerequisites
@@ -9,8 +16,8 @@ This guide walks you through running your own fwdx tunneling server so you can e
 - **A server** with a public IP (VPS: DigitalOcean, Linode, Hetzner, AWS, etc.).
 - **A domain name** you control (e.g. `example.com`). You’ll use a subdomain for the tunnel server (e.g. `tunnel.example.com`).
 - **Ports open** on the server:
-  - **443** – Public HTTPS (browsers and clients hit this for tunneled traffic).
-  - **4443** – Tunnel registration (clients connect here to register tunnels). Optional if you use 443 for both (see below).
+  - **443** – Public HTTPS (browsers hit this; nginx proxies to fwdx web).
+  - **4443** – Tunnel gRPC (clients connect here; nginx proxies to fwdx grpc).
 
 ---
 
@@ -24,13 +31,13 @@ This guide walks you through running your own fwdx tunneling server so you can e
 
 Result: `tunnel.example.com` resolves to your server’s IP.
 
-(Optional) If you use a **subdomain for the server** (e.g. `tunnel.example.com`), you can later add a **wildcard** `*.tunnel.example.com` so that `myapp.tunnel.example.com`, `dev.tunnel.example.com`, etc. all go to the same server. For fwdx you don’t have to create individual A records for each subdomain—the server handles hostname routing.
+(Optional) Add a **wildcard** `*.tunnel.example.com` so that `myapp.tunnel.example.com`, `dev.tunnel.example.com`, etc. all go to the same server. fwdx routes by hostname; you don’t need individual A records per subdomain.
 
 ---
 
 ## 3. Get TLS certificates (HTTPS)
 
-The server **requires** TLS. Easiest is **Let’s Encrypt** with Certbot.
+The public-facing server **requires** TLS. Easiest is **Let’s Encrypt** with Certbot.
 
 ### 3.1 Install Certbot (on the server)
 
@@ -58,7 +65,7 @@ sudo dnf install certbot
 
 Use the hostname you set in DNS (e.g. `tunnel.example.com`).
 
-- **If you use nginx** (recommended): Use **webroot** so nginx can keep serving port 80 for ACME. See step 4.2 below; get the cert after nginx is installed and the webroot location exists.
+- **If you use nginx** (recommended): Use **webroot** so nginx can keep serving port 80 for ACME. See step 4.1; get the cert after nginx is installed and the webroot location exists.
 - **If you run fwdx directly** (no nginx): Certbot must bind to port 80. Stop any web server on 80, then:
 
 ```bash
@@ -71,9 +78,9 @@ sudo certbot certonly --standalone -d tunnel.example.com
   - Certificate: `/etc/letsencrypt/live/tunnel.example.com/fullchain.pem`
   - Private key: `/etc/letsencrypt/live/tunnel.example.com/privkey.pem`
 
-### 3.3 Let fwdx read the key (permissions)
+### 3.3 Let fwdx read the key (when not using nginx)
 
-fwdx must read both files. Easiest is to run fwdx as root (e.g. systemd service as root), or copy certs to a directory the fwdx user can read:
+If fwdx terminates TLS (no nginx), it must read both files. Easiest is to run fwdx as root (e.g. systemd service), or copy certs to a directory the fwdx user can read:
 
 ```bash
 sudo mkdir -p /etc/fwdx
@@ -84,16 +91,18 @@ sudo chmod 600 /etc/fwdx/key.pem
 
 (If you run fwdx as a dedicated user, give that user read access to `/etc/fwdx`.)
 
-**Renewal:** Certbot can renew with `sudo certbot renew`. Use a cron or systemd timer to run that periodically. After renewal, either restart fwdx or copy the new certs to `/etc/fwdx` again if you use copies.
+**Renewal:** Certbot can renew with `sudo certbot renew`. Use a cron or systemd timer. After renewal, restart fwdx (or copy the new certs if you use copies).
 
 ---
 
 ## 4. Run behind nginx (recommended)
 
-This section assumes **nginx is already running** on **443** with other sites. We add one more server block so nginx terminates TLS for the tunnel hostname and **reverse-proxies HTTP** to fwdx. fwdx runs with a **single port** in HTTP-only mode (no TLS); nginx holds the certificate.
+nginx terminates TLS on **443** (HTTPS) and **4443** (gRPC). It forwards:
 
-- **One port:** Everything (public traffic and tunnel registration) goes over **443**. Clients use `https://tunnel.example.com` with no extra port.
-- **No cert on fwdx:** Only nginx needs the certificate; fwdx listens on HTTP locally.
+- **443** → fwdx **web port** (HTTP)
+- **4443** → fwdx **gRPC port** (TCP/stream)
+
+fwdx runs with **no TLS** (plain HTTP and plain gRPC on localhost).
 
 ### 4.1 Certificate (webroot with existing nginx)
 
@@ -105,14 +114,19 @@ sudo certbot certonly --webroot -w /var/www/acme -d tunnel.example.com --email y
 
 (Replace `-w /var/www/acme` with your actual webroot. Ensure the server that handles `tunnel.example.com` on port 80 has `location /.well-known/acme-challenge/` for renewal.)
 
-You do **not** copy the cert to fwdx; nginx will use it in the server block below.
+nginx will use this cert in the server blocks below; you do **not** copy it into fwdx.
 
-### 4.2 Nginx: reverse proxy for the tunnel hostname
+### 4.2 Nginx: reverse proxy for HTTPS and gRPC
 
-Add a **new server block** (e.g. in `/etc/nginx/sites-available/fwdx` or inside an existing config) so that requests to `tunnel.example.com` and `*.tunnel.example.com` are proxied to fwdx. Nginx terminates TLS; fwdx receives plain HTTP on one port (e.g. **4430**).
+Add a **new server block** (e.g. in `/etc/nginx/sites-available/fwdx`) so that:
+
+- Requests to `tunnel.example.com` and `*.tunnel.example.com` on **443** are proxied to fwdx’s web port.
+- Connections to **4443** are proxied as a **stream** to fwdx’s gRPC port.
+
+**HTTP/HTTPS (proxy + admin):**
 
 ```nginx
-# fwdx: TLS on 443, reverse proxy to local HTTP backend (single port)
+# fwdx: TLS on 443, reverse proxy to fwdx web port
 server {
   listen 443 ssl;
   listen [::]:443 ssl;
@@ -122,7 +136,7 @@ server {
   ssl_certificate_key /etc/letsencrypt/live/tunnel.example.com/privkey.pem;
 
   location / {
-    proxy_pass http://127.0.0.1:4430;
+    proxy_pass http://127.0.0.1:8080;
     proxy_http_version 1.1;
     proxy_set_header Host $host;
     proxy_set_header X-Real-IP $remote_addr;
@@ -134,13 +148,32 @@ server {
 }
 ```
 
+**gRPC (tunnel) on 4443:**  
+Add a **stream** block (in the main `nginx.conf`, top-level alongside `http { }`). Nginx terminates TLS on 4443 and forwards plain gRPC to fwdx’s grpc port (e.g. 4440):
+
+```nginx
+stream {
+  server {
+    listen 4443 ssl;
+    listen [::]:4443 ssl;
+    ssl_certificate     /etc/letsencrypt/live/tunnel.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/tunnel.example.com/privkey.pem;
+    proxy_pass 127.0.0.1:4440;
+    proxy_connect_timeout 10s;
+    proxy_timeout 86400s;
+  }
+}
+```
+
+Use the same grpc port (e.g. **4440**) as in fwdx’s `--grpc-port`.
+
 Enable the site if you use a separate file (e.g. `ln -s /etc/nginx/sites-available/fwdx /etc/nginx/sites-enabled/`), then:
 
 ```bash
 sudo nginx -t && sudo systemctl reload nginx
 ```
 
-### 4.3 fwdx: HTTP-only, single port
+### 4.3 fwdx: HTTP web + plain gRPC (no TLS)
 
 Install fwdx (binary from [Releases](https://github.com/BRAVO68WEB/fwdx/releases) or build from source). Generate tokens:
 
@@ -151,7 +184,7 @@ echo "FWDX_CLIENT_TOKEN=$CLIENT_TOKEN"
 echo "FWDX_ADMIN_TOKEN=$ADMIN_TOKEN"
 ```
 
-Create the systemd service. fwdx listens **only HTTP** on one port (**4430**); no TLS flags.
+Create the systemd service. fwdx listens on **web** (e.g. 8080) and **grpc** (e.g. 4440) with **no TLS**:
 
 ```bash
 sudo mkdir -p /var/lib/fwdx
@@ -166,7 +199,8 @@ ExecStart=/usr/local/bin/fwdx serve \
   --hostname tunnel.example.com \
   --client-token YOUR_CLIENT_TOKEN \
   --admin-token YOUR_ADMIN_TOKEN \
-  --http-port 4430 \
+  --web-port 8080 \
+  --grpc-port 4440 \
   --data-dir /var/lib/fwdx
 Restart=always
 RestartSec=5
@@ -176,7 +210,7 @@ WantedBy=multi-user.target
 EOF
 ```
 
-Replace `YOUR_CLIENT_TOKEN` and `YOUR_ADMIN_TOKEN` (and `tunnel.example.com` if different). Then:
+Replace `YOUR_CLIENT_TOKEN` and `YOUR_ADMIN_TOKEN` (and `tunnel.example.com` if different). Ports **8080** and **4440** must match what you used in nginx (`proxy_pass` and `proxy_pass 127.0.0.1:4440`). Then:
 
 ```bash
 sudo systemctl daemon-reload
@@ -187,7 +221,15 @@ sudo systemctl status fwdx
 
 ### 4.4 Firewall
 
-If nginx already listens on 443, no new ports are needed. Ensure 80 (for ACME) and 443 are allowed. Do **not** expose 4430 publicly.
+Allow **80** (ACME), **443** (HTTPS), and **4443** (gRPC). Do **not** expose 8080 or 4440 publicly.
+
+```bash
+# If using ufw:
+sudo ufw allow 80/tcp
+sudo ufw allow 443/tcp
+sudo ufw allow 4443/tcp
+sudo ufw reload
+```
 
 ### 4.5 Verify
 
@@ -197,19 +239,20 @@ From your laptop:
 curl -sI https://tunnel.example.com/
 ```
 
-You should get an HTTP response. **“no tunnel for this hostname”** is normal at this stage: it means the server and nginx are working, but no tunnel is registered yet. The server hostname (`tunnel.example.com`) is not used for app traffic—you use **subdomains** like `myapp.tunnel.example.com`. To get a real response:
+You should get an HTTP response. **“no tunnel for this hostname”** is normal until a tunnel is registered. Then:
 
-1. On your **laptop**, set `FWDX_SERVER=https://tunnel.example.com` and `FWDX_TOKEN=your-client-token`.
-2. Run `fwdx tunnel create -l localhost:8080 -s myapp --name myapp` then `fwdx tunnel start myapp`.
-3. Open **https://myapp.tunnel.example.com** in a browser (not `tunnel.example.com`).
+1. Set `FWDX_SERVER=https://tunnel.example.com` and `FWDX_TOKEN=your-client-token`.
+2. Set **`FWDX_TUNNEL_PORT=4443`** (or in `~/.fwdx/client.json`: `"tunnel_port": 4443`) so the client connects to gRPC on 4443.
+3. Run `fwdx tunnel create -l localhost:8080 -s myapp --name myapp` then `fwdx tunnel start myapp`.
+4. Open **https://myapp.tunnel.example.com** in a browser.
 
-Then continue with **section 8** for the full client steps. Clients use **one URL:** `FWDX_SERVER=https://tunnel.example.com` (port 443); tunnel registration uses the same port automatically.
+Traffic flow: browser → nginx (443) → fwdx web → tunnel (gRPC over 4443) → your laptop → localhost:8080.
 
 ---
 
 ## 5. Option A: Run the binary directly (no nginx)
 
-If you do **not** use nginx, fwdx can listen on 443 and 4443 directly. Get the certificate with `certbot certonly --standalone` (see 3.2) and run fwdx on those ports.
+If you do **not** use nginx, fwdx can listen on 443 and 4443 with TLS. Get the certificate with `certbot certonly --standalone` (see 3.2) and run fwdx with `--tls-cert` and `--tls-key`.
 
 ### 5.1 Install fwdx on the server
 
@@ -227,14 +270,13 @@ sudo mv fwdx /usr/local/bin/
 Generate two random secrets: one for **clients** (tunnel registration) and one for **admin** (manage tunnels, domains). Keep them safe.
 
 ```bash
-# Example (use your own in production):
 CLIENT_TOKEN=$(openssl rand -hex 24)
 ADMIN_TOKEN=$(openssl rand -hex 24)
 echo "FWDX_CLIENT_TOKEN=$CLIENT_TOKEN"
 echo "FWDX_ADMIN_TOKEN=$ADMIN_TOKEN"
 ```
 
-Save these; you’ll use the client token on your laptop and the admin token for `fwdx manage` and `fwdx domains add`.
+Save these; you’ll use the client token on your laptop and the admin token for admin API and `fwdx domains add`.
 
 ### 5.3 Create a systemd service
 
@@ -254,8 +296,8 @@ ExecStart=/usr/local/bin/fwdx serve \
   --admin-token YOUR_ADMIN_TOKEN \
   --tls-cert /etc/fwdx/cert.pem \
   --tls-key /etc/fwdx/key.pem \
-  --https-port 443 \
-  --tunnel-port 4443 \
+  --web-port 443 \
+  --grpc-port 4443 \
   --data-dir /var/lib/fwdx
 Restart=always
 RestartSec=5
@@ -267,8 +309,6 @@ EOF
 
 - Replace `YOUR_CLIENT_TOKEN` and `YOUR_ADMIN_TOKEN` with the values from step 5.2.
 - Create data directory: `sudo mkdir -p /var/lib/fwdx`
-
-If you want to use **only port 443** for both public and tunnel traffic (no 4443), set `--tunnel-port 443` and ensure no other service uses 443. Then clients will connect to `https://tunnel.example.com` (port 443) for registration.
 
 ### 5.4 Open firewall ports
 
@@ -293,18 +333,19 @@ sudo systemctl start fwdx
 sudo systemctl status fwdx
 ```
 
-Check logs: `sudo journalctl -u fwdx -f`. All server messages are prefixed with `[fwdx]`: startup, tunnel registered/gone, proxy requests (host, method, path, status), and auth/validation failures.
+Check logs: `sudo journalctl -u fwdx -f`. All server messages are prefixed with `[fwdx]`.
 
 ---
 
 ## 6. Option B: Run with Docker
 
-You can run fwdx in Docker **behind nginx** (recommended): use the nginx reverse-proxy config from section 4.2 and run the container with **one** port, HTTP-only:
+You can run fwdx in Docker **behind nginx**: use the nginx config from section 4.2 and run the container with **web** and **grpc** ports, no TLS:
 
 ```bash
 docker run -d --name fwdx \
   --restart unless-stopped \
-  -p 127.0.0.1:4430:4430 \
+  -p 127.0.0.1:8080:8080 \
+  -p 127.0.0.1:4440:4440 \
   -v fwdx-data:/var/lib/fwdx \
   -e FWDX_HOSTNAME=tunnel.example.com \
   -e FWDX_CLIENT_TOKEN=your-client-token \
@@ -312,56 +353,14 @@ docker run -d --name fwdx \
   ghcr.io/BRAVO68WEB/fwdx:latest \
   serve \
   --hostname tunnel.example.com \
-  --http-port 4430 \
+  --web-port 8080 \
+  --grpc-port 4440 \
   --data-dir /var/lib/fwdx
 ```
 
-Nginx on the host proxies `https://tunnel.example.com` to `http://127.0.0.1:4430`. No TLS inside the container.
+Nginx on the host proxies 443 → `127.0.0.1:8080` and 4443 → `127.0.0.1:4440`.
 
-Or run **without nginx** (container binds 443/4443 on the host): use the instructions below and publish 443 and 4443.
-
-### 6.1 Prepare TLS and tokens
-
-On the server, create a directory for config and put certs and a script (or env file) there:
-
-```bash
-sudo mkdir -p /opt/fwdx
-sudo cp /etc/fwdx/cert.pem /opt/fwdx/
-sudo cp /etc/fwdx/key.pem /opt/fwdx/
-```
-
-Create an env file with your tokens (replace with your real tokens):
-
-```bash
-sudo tee /opt/fwdx/env << 'EOF'
-FWDX_HOSTNAME=tunnel.example.com
-FWDX_CLIENT_TOKEN=your-client-token-here
-FWDX_ADMIN_TOKEN=your-admin-token-here
-EOF
-sudo chmod 600 /opt/fwdx/env
-```
-
-### 6.2 Run the container
-
-The fwdx image reads `FWDX_HOSTNAME`, `FWDX_CLIENT_TOKEN`, and `FWDX_ADMIN_TOKEN` from the environment. Use the same image from GitHub Container Registry (replace `BRAVO68WEB` with the repo owner if different):
-
-```bash
-docker run -d --name fwdx \
-  --restart unless-stopped \
-  -p 443:443 -p 4443:4443 \
-  -v /opt/fwdx/cert.pem:/etc/fwdx/cert.pem:ro \
-  -v /opt/fwdx/key.pem:/etc/fwdx/key.pem:ro \
-  -v fwdx-data:/var/lib/fwdx \
-  --env-file /opt/fwdx/env \
-  ghcr.io/BRAVO68WEB/fwdx:latest \
-  serve \
-  --hostname tunnel.example.com \
-  --tls-cert /etc/fwdx/cert.pem \
-  --tls-key /etc/fwdx/key.pem \
-  --data-dir /var/lib/fwdx
-```
-
-Or pass variables explicitly instead of `--env-file`:
+**Without nginx** (container binds 443 and 4443 with TLS): mount certs and pass TLS flags:
 
 ```bash
 docker run -d --name fwdx \
@@ -378,6 +377,8 @@ docker run -d --name fwdx \
   --hostname tunnel.example.com \
   --tls-cert /etc/fwdx/cert.pem \
   --tls-key /etc/fwdx/key.pem \
+  --web-port 443 \
+  --grpc-port 4443 \
   --data-dir /var/lib/fwdx
 ```
 
@@ -393,7 +394,7 @@ From your **local machine** (not the server):
 curl -sI https://tunnel.example.com/
 ```
 
-You should get HTTP (e.g. 404 or “no tunnel for this hostname”). That’s expected until you register a tunnel. If you get a TLS or connection error, check DNS, firewall, and that fwdx is listening on 443.
+You should get HTTP (e.g. 404 or “no tunnel for this hostname”). That’s expected until you register a tunnel. If you get a TLS or connection error, check DNS, firewall, and that fwdx (or nginx) is listening on 443.
 
 ---
 
@@ -410,7 +411,12 @@ export FWDX_SERVER=https://tunnel.example.com
 export FWDX_TOKEN=your-client-token
 ```
 
-Use the same **client token** you set on the server. When the server is behind nginx on 443, the client uses this URL only; the tunnel port (443) is taken from the URL.
+- **Behind nginx (ports 443 + 4443):** Set the tunnel port so the client connects to gRPC on 4443:
+  ```bash
+  export FWDX_TUNNEL_PORT=4443
+  ```
+  Or in `~/.fwdx/client.json`: `"tunnel_port": 4443`. The client will use `https://tunnel.example.com:4443` for the gRPC tunnel.
+- **Direct (fwdx on 443 and 4443):** Same: `FWDX_SERVER=https://tunnel.example.com` and `FWDX_TUNNEL_PORT=4443`.
 
 ### 8.3 Create and start a tunnel
 
@@ -421,7 +427,7 @@ fwdx tunnel create -l localhost:8080 -s myapp --name myapp
 fwdx tunnel start myapp
 ```
 
-Then open in a browser: `https://myapp.tunnel.example.com`. Traffic goes: browser → nginx (443) → fwdx (HTTP backend) → long-lived connection from your laptop → localhost:8080.
+Then open in a browser: `https://myapp.tunnel.example.com`. Traffic goes: browser → server (443) → fwdx → gRPC tunnel to your laptop → localhost:8080.
 
 ### 8.4 Optional: run tunnel in background
 
@@ -466,10 +472,10 @@ Then `https://app.mycompany.com` will proxy to your local port 3000.
 |------|--------|
 | 1 | Get a VPS and a domain |
 | 2 | A record: `tunnel.example.com` → server IP |
-| 3 | Certbot (webroot) for `tunnel.example.com`; nginx keeps using 443 for other sites |
-| 4 | Add nginx server block: TLS for `tunnel.example.com` + `*.tunnel.example.com`, `proxy_pass http://127.0.0.1:4430` |
-| 5 | Install fwdx; generate tokens; systemd with `--http-port 4430` (no TLS) |
-| 6 | Start nginx and fwdx; from laptop set `FWDX_SERVER=https://tunnel.example.com`, create and start tunnel |
+| 3 | Certbot (webroot) for `tunnel.example.com`; nginx uses cert on 443 and 4443 |
+| 4 | Nginx: server block for 443 → `proxy_pass` to fwdx web (e.g. 8080); stream block for 4443 → fwdx grpc (e.g. 4440) |
+| 5 | Install fwdx; generate tokens; systemd with `--web-port 8080 --grpc-port 4440` (no TLS) |
+| 6 | Start nginx and fwdx; from laptop set `FWDX_SERVER=https://tunnel.example.com`, `FWDX_TUNNEL_PORT=4443`, create and start tunnel |
 | 7 | (Optional) Add custom domain with `fwdx domains add` and CNAME |
 
 For more commands (list tunnels, manage domains, config, health), see the main [README](../README.md).

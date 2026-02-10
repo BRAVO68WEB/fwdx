@@ -1,8 +1,20 @@
 package server
 
 import (
+	"context"
 	"testing"
 )
+
+// mockConn implements TunnelConnection for tests.
+type mockConn struct {
+	remoteAddr string
+}
+
+func (m *mockConn) EnqueueRequest(context.Context, *ProxyRequest) (*ProxyResponse, bool) {
+	return nil, false
+}
+func (m *mockConn) GetRemoteAddr() string { return m.remoteAddr }
+func (m *mockConn) Close()                {}
 
 func TestNewRegistry(t *testing.T) {
 	r := NewRegistry()
@@ -16,16 +28,12 @@ func TestNewRegistry(t *testing.T) {
 
 func TestRegistry_Register_Get_List(t *testing.T) {
 	r := NewRegistry()
-
-	conn := &TunnelConn{Hostname: "app.example.com", LocalURL: "http://localhost:8080", RemoteAddr: "127.0.0.1:12345"}
+	conn := &mockConn{remoteAddr: "127.0.0.1:12345"}
 	r.Register("app.example.com", conn)
 
 	got := r.Get("app.example.com")
 	if got != conn {
 		t.Errorf("Get() = %v, want %v", got, conn)
-	}
-	if got.Hostname != "app.example.com" {
-		t.Errorf("Hostname = %q", got.Hostname)
 	}
 
 	list := r.List()
@@ -47,27 +55,22 @@ func TestRegistry_Get_NotFound(t *testing.T) {
 
 func TestRegistry_Register_Overwrite(t *testing.T) {
 	r := NewRegistry()
-
-	conn1 := &TunnelConn{Hostname: "app.example.com", RemoteAddr: "1.2.3.4"}
-	r.Register("app.example.com", conn1)
-
-	conn2 := &TunnelConn{Hostname: "app.example.com", RemoteAddr: "5.6.7.8"}
-	r.Register("app.example.com", conn2)
+	r.Register("app.example.com", &mockConn{remoteAddr: "1.2.3.4"})
+	r.Register("app.example.com", &mockConn{remoteAddr: "5.6.7.8"})
 
 	got := r.Get("app.example.com")
-	if got != conn2 {
-		t.Errorf("Get() after overwrite = %v, want conn2", got)
+	if got == nil {
+		t.Fatal("Get() = nil")
 	}
-	if got.RemoteAddr != "5.6.7.8" {
-		t.Errorf("RemoteAddr = %q", got.RemoteAddr)
+	if got.GetRemoteAddr() != "5.6.7.8" {
+		t.Errorf("GetRemoteAddr() = %q", got.GetRemoteAddr())
 	}
 }
 
 func TestRegistry_Unregister(t *testing.T) {
 	r := NewRegistry()
-	conn := &TunnelConn{Hostname: "app.example.com", RemoteAddr: "127.0.0.1"}
+	conn := &mockConn{remoteAddr: "127.0.0.1"}
 	r.Register("app.example.com", conn)
-
 	r.Unregister("app.example.com")
 
 	if r.Get("app.example.com") != nil {
@@ -80,7 +83,6 @@ func TestRegistry_Unregister(t *testing.T) {
 
 func TestRegistry_Unregister_Nonexistent(t *testing.T) {
 	r := NewRegistry()
-	// should not panic
 	r.Unregister("nonexistent.example.com")
 }
 
@@ -97,8 +99,8 @@ func TestRegistry_List_Empty(t *testing.T) {
 
 func TestRegistry_MultipleHosts(t *testing.T) {
 	r := NewRegistry()
-	r.Register("a.example.com", &TunnelConn{Hostname: "a", RemoteAddr: "1"})
-	r.Register("b.example.com", &TunnelConn{Hostname: "b", RemoteAddr: "2"})
+	r.Register("a.example.com", &mockConn{remoteAddr: "1"})
+	r.Register("b.example.com", &mockConn{remoteAddr: "2"})
 
 	list := r.List()
 	if len(list) != 2 {

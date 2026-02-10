@@ -1,0 +1,56 @@
+syntax = "proto3";
+
+package tunnel.v1;
+
+option go_package = "github.com/BRAVO68WEB/fwdx/api/tunnel/v1;tunnelv1";
+
+// TunnelService runs on the dedicated tunnel port (e.g. 4443). Client opens a
+// bidirectional stream: first message is Register; then server sends
+// ProxyRequest and client sends ProxyResponse on the same connection.
+service TunnelService {
+  // Connect: bidirectional stream. Client sends Register then ProxyResponses;
+  // server sends RegisterAck then ProxyRequests.
+  rpc Connect(stream ClientMessage) returns (stream ServerMessage);
+}
+
+// ClientMessage is sent by the tunnel client.
+message ClientMessage {
+  oneof message {
+    Register register = 1;
+    ProxyResponse proxy_response = 2;
+  }
+}
+
+// ServerMessage is sent by the tunnel server.
+message ServerMessage {
+  oneof message {
+    RegisterAck register_ack = 1;
+    ProxyRequest proxy_request = 2;
+  }
+}
+
+message Register {
+  string hostname = 1;
+  string local_url = 2;
+}
+
+message RegisterAck {
+  bool ok = 1;
+  string error = 2;  // if !ok
+}
+
+message ProxyRequest {
+  string id = 1;
+  string method = 2;
+  string path = 3;
+  string query = 4;
+  map<string, string> headers = 5;
+  bytes body = 6;
+}
+
+message ProxyResponse {
+  string id = 1;
+  int32 status = 2;
+  map<string, string> headers = 3;
+  bytes body = 4;
+}

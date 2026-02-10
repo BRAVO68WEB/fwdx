@@ -12,8 +12,8 @@ import (
 
 var serveCmd = &cobra.Command{
 	Use:   "serve",
-	Short: "Start the fwdx tunneling server",
-	Long:  `Start the fwdx tunneling server. Clients connect to register tunnels; public traffic is proxied by hostname.`,
+	Short: "Start the fwdx server",
+	Long:  `Start the fwdx server. Web port: HTTP/HTTPS (proxy + admin). Grpc port: tunnel connections. Use nginx to forward 443 -> web and gRPC stream -> grpc.`,
 	RunE:  runServe,
 }
 
@@ -22,13 +22,12 @@ func init() {
 	dataDirDefault := home + "/.fwdx-server"
 
 	serveCmd.Flags().String("hostname", "", "Server public hostname (e.g. tunnel.example.com)")
-	serveCmd.Flags().Int("https-port", 443, "HTTPS port for public and tunnel traffic")
-	serveCmd.Flags().Int("tunnel-port", 4443, "Tunnel registration port (clients connect here)")
-	serveCmd.Flags().String("client-token", "", "Token required for tunnel registration (or FWDX_CLIENT_TOKEN)")
-	serveCmd.Flags().String("admin-token", "", "Token required for admin API (or FWDX_ADMIN_TOKEN)")
-	serveCmd.Flags().String("tls-cert", "", "Path to TLS certificate file (omit when using --http-port behind nginx)")
-	serveCmd.Flags().String("tls-key", "", "Path to TLS private key file (omit when using --http-port)")
-	serveCmd.Flags().Int("http-port", 0, "Listen HTTP only on this port (single port; use when nginx terminates TLS)")
+	serveCmd.Flags().Int("web-port", 8080, "Port for HTTP/HTTPS (proxy + admin). Nginx forwards 443 here.")
+	serveCmd.Flags().Int("grpc-port", 4440, "Port for gRPC tunnel. Nginx forwards gRPC stream here.")
+	serveCmd.Flags().String("client-token", "", "Token for tunnel clients (or FWDX_CLIENT_TOKEN)")
+	serveCmd.Flags().String("admin-token", "", "Token for admin API (or FWDX_ADMIN_TOKEN)")
+	serveCmd.Flags().String("tls-cert", "", "TLS cert path (omit when nginx terminates TLS)")
+	serveCmd.Flags().String("tls-key", "", "TLS key path (omit when nginx terminates TLS)")
 	serveCmd.Flags().String("data-dir", dataDirDefault, "Directory for allowed_domains.json")
 }
 
@@ -37,8 +36,8 @@ func runServe(cmd *cobra.Command, args []string) error {
 	if hostname == "" {
 		hostname = os.Getenv("FWDX_HOSTNAME")
 	}
-	httpsPort, _ := cmd.Flags().GetInt("https-port")
-	tunnelPort, _ := cmd.Flags().GetInt("tunnel-port")
+	webPort, _ := cmd.Flags().GetInt("web-port")
+	grpcPort, _ := cmd.Flags().GetInt("grpc-port")
 	clientToken, _ := cmd.Flags().GetString("client-token")
 	if clientToken == "" {
 		clientToken = os.Getenv("FWDX_CLIENT_TOKEN")
@@ -49,7 +48,6 @@ func runServe(cmd *cobra.Command, args []string) error {
 	}
 	tlsCert, _ := cmd.Flags().GetString("tls-cert")
 	tlsKey, _ := cmd.Flags().GetString("tls-key")
-	httpPort, _ := cmd.Flags().GetInt("http-port")
 	dataDir, _ := cmd.Flags().GetString("data-dir")
 
 	if hostname == "" {
@@ -58,18 +56,11 @@ func runServe(cmd *cobra.Command, args []string) error {
 	if clientToken == "" {
 		return fmt.Errorf("client-token is required (--client-token or FWDX_CLIENT_TOKEN)")
 	}
-	if httpPort == 0 && (tlsCert == "" || tlsKey == "") {
-		return fmt.Errorf("tls-cert and tls-key are required (or use --http-port when behind a reverse proxy)")
-	}
-	if httpPort != 0 && (tlsCert != "" || tlsKey != "") {
-		return fmt.Errorf("do not set tls-cert/tls-key when using --http-port")
-	}
 
 	cfg := server.Config{
 		Hostname:    hostname,
-		HTTPSPort:   httpsPort,
-		TunnelPort:  tunnelPort,
-		HTTPPort:    httpPort,
+		WebPort:     webPort,
+		GrpcPort:    grpcPort,
 		ClientToken: clientToken,
 		AdminToken:  adminToken,
 		TLSCertFile: tlsCert,
@@ -82,12 +73,10 @@ func runServe(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	if httpPort != 0 {
-		log.Printf("[fwdx] server starting (HTTP, behind proxy): http://:%d", httpPort)
-	} else if httpsPort == tunnelPort {
-		log.Printf("[fwdx] server starting: https://%s (single port :%d)", hostname, httpsPort)
+	if tlsCert != "" && tlsKey != "" {
+		log.Printf("[fwdx] server listening https://:%d (web), grpc://:%d (tunnels)", webPort, grpcPort)
 	} else {
-		log.Printf("[fwdx] server starting: https://%s (public :%d, tunnel :%d)", hostname, httpsPort, tunnelPort)
+		log.Printf("[fwdx] server listening http://:%d (web), grpc://:%d (tunnels) — put nginx in front", webPort, grpcPort)
 	}
 	return srv.Run()
 }
