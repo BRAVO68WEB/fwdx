@@ -1,0 +1,47 @@
+# Docker e2e: server (fwdx serve), app (minimal HTTP server), client (fwdx tunnel start).
+# Run from this directory. Build context for fwdx is repo root (../..).
+
+services:
+  server:
+    build:
+      context: ../..
+      dockerfile: tests/docker/Dockerfile.fwdx
+    entrypoint: []
+    command: ["/bin/sh", "/scripts/entrypoint-server.sh"]
+    volumes:
+      - ./scripts/entrypoint-server.sh:/scripts/entrypoint-server.sh:ro
+    ports:
+      - "8443:443"
+      - "8444:4443"
+    healthcheck:
+      # Root returns 404 until a tunnel is registered; use admin endpoint to verify server is up.
+      test: ["CMD-SHELL", "wget -q -O /dev/null --no-check-certificate --header='Authorization: Bearer e2e-docker-admin' https://localhost:443/admin/info || exit 1"]
+      interval: 2s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+
+  app:
+    build:
+      context: ./app
+      dockerfile: ../Dockerfile.app
+    expose:
+      - "8080"
+
+  client:
+    build:
+      context: ../..
+      dockerfile: tests/docker/Dockerfile.fwdx
+    entrypoint: []
+    command: ["/bin/sh", "/scripts/entrypoint-client.sh"]
+    volumes:
+      - ./scripts/entrypoint-client.sh:/scripts/entrypoint-client.sh:ro
+    environment:
+      FWDX_SERVER: https://server:4443
+      FWDX_TOKEN: e2e-docker-token
+      FWDX_INSECURE_SKIP_VERIFY: "1"
+    depends_on:
+      server:
+        condition: service_healthy
+      app:
+        condition: service_started
