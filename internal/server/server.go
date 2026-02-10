@@ -56,7 +56,7 @@ func New(cfg Config) (*Server, error) {
 		registry: registry,
 		domains:  domains,
 		tunnelHandler: TunnelHandler(registry, cfg.ClientToken, domains.List, cfg.Hostname),
-		proxyHandler:  ProxyHandler(registry),
+		proxyHandler:  ProxyHandler(registry, cfg.Hostname),
 	}
 	return s, nil
 }

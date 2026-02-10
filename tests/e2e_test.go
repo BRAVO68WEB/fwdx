@@ -38,7 +38,7 @@ func TestE2E_RegisterAndProxy(t *testing.T) {
 	reg := server.NewRegistry()
 	domains := server.NewDomainStore(t.TempDir())
 	tunnelHandler := server.TunnelHandler(reg, testClientToken, domains.List, testHostname)
-	proxyHandler := server.ProxyHandler(reg)
+	proxyHandler := server.ProxyHandler(reg, testHostname)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/register", tunnelHandler.ServeHTTP)
@@ -96,7 +96,7 @@ func TestE2E_RegisterAndProxy(t *testing.T) {
 // TestE2E_Proxy_NoTunnel returns 404 when no tunnel is registered for hostname.
 func TestE2E_Proxy_NoTunnel(t *testing.T) {
 	reg := server.NewRegistry()
-	proxyHandler := server.ProxyHandler(reg)
+	proxyHandler := server.ProxyHandler(reg, testHostname)
 	srv := httptest.NewServer(proxyHandler)
 	defer srv.Close()
 

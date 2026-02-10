@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -29,7 +30,7 @@ func TestHostWithoutPort(t *testing.T) {
 
 func TestProxyHandler_NoTunnel(t *testing.T) {
 	reg := NewRegistry()
-	handler := ProxyHandler(reg)
+	handler := ProxyHandler(reg, "tunnel.example.com")
 
 	req := httptest.NewRequest(http.MethodGet, "https://unknown.example.com/", nil)
 	req.Host = "unknown.example.com"
@@ -44,6 +45,27 @@ func TestProxyHandler_NoTunnel(t *testing.T) {
 	}
 }
 
+func TestProxyHandler_ServerHostname_InfoPage(t *testing.T) {
+	reg := NewRegistry()
+	handler := ProxyHandler(reg, "tunnel.example.com")
+
+	req := httptest.NewRequest(http.MethodGet, "https://tunnel.example.com/", nil)
+	req.Host = "tunnel.example.com"
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("status = %d, want 200", rec.Code)
+	}
+	body := rec.Body.String()
+	if body == "" || body == "no tunnel for this hostname\n" {
+		t.Errorf("expected info body, got %q", body)
+	}
+	if !strings.Contains(body, "fwdx server at tunnel.example.com") {
+		t.Errorf("body should mention server hostname, got %q", body)
+	}
+}
+
 func TestProxyHandler_WithTunnel_NoResponse(t *testing.T) {
 	reg := NewRegistry()
 	conn := &TunnelConn{
@@ -55,7 +77,7 @@ func TestProxyHandler_WithTunnel_NoResponse(t *testing.T) {
 	}
 	reg.Register("app.example.com", conn)
 
-	handler := ProxyHandler(reg)
+	handler := ProxyHandler(reg, "tunnel.example.com")
 	req := httptest.NewRequest(http.MethodGet, "https://app.example.com/", nil)
 	req.Host = "app.example.com"
 	rec := httptest.NewRecorder()
@@ -82,7 +104,7 @@ func TestProxyHandler_HostWithPort(t *testing.T) {
 	}
 	reg.Register("app.example.com", conn)
 
-	handler := ProxyHandler(reg)
+	handler := ProxyHandler(reg, "tunnel.example.com")
 	req := httptest.NewRequest(http.MethodGet, "https://app.example.com/", nil)
 	req.Host = "app.example.com:443"
 	ctx, cancel := context.WithTimeout(req.Context(), 50*time.Millisecond)

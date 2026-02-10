@@ -197,7 +197,13 @@ From your laptop:
 curl -sI https://tunnel.example.com/
 ```
 
-You should get an HTTP response (e.g. 404 or “no tunnel”). Then continue with **section 8** to create a tunnel. Clients use **one URL:** `FWDX_SERVER=https://tunnel.example.com` (port 443); tunnel registration uses the same port automatically.
+You should get an HTTP response. **“no tunnel for this hostname”** is normal at this stage: it means the server and nginx are working, but no tunnel is registered yet. The server hostname (`tunnel.example.com`) is not used for app traffic—you use **subdomains** like `myapp.tunnel.example.com`. To get a real response:
+
+1. On your **laptop**, set `FWDX_SERVER=https://tunnel.example.com` and `FWDX_TOKEN=your-client-token`.
+2. Run `fwdx tunnel create -l localhost:8080 -s myapp --name myapp` then `fwdx tunnel start myapp`.
+3. Open **https://myapp.tunnel.example.com** in a browser (not `tunnel.example.com`).
+
+Then continue with **section 8** for the full client steps. Clients use **one URL:** `FWDX_SERVER=https://tunnel.example.com` (port 443); tunnel registration uses the same port automatically.
 
 ---
 
@@ -287,7 +293,7 @@ sudo systemctl start fwdx
 sudo systemctl status fwdx
 ```
 
-Check logs: `sudo journalctl -u fwdx -f`
+Check logs: `sudo journalctl -u fwdx -f`. All server messages are prefixed with `[fwdx]`: startup, tunnel registered/gone, proxy requests (host, method, path, status), and auth/validation failures.
 
 ---
 

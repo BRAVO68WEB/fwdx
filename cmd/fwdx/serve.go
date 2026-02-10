@@ -2,6 +2,7 @@ package fwdx
 
 import (
 	"fmt"
+	"log"
 	"os"
 
 	"github.com/BRAVO68WEB/fwdx/internal/server"
@@ -82,11 +83,11 @@ func runServe(cmd *cobra.Command, args []string) error {
 	}
 
 	if httpPort != 0 {
-		fmt.Printf("fwdx server starting (HTTP, behind proxy): http://:%d\n", httpPort)
+		log.Printf("[fwdx] server starting (HTTP, behind proxy): http://:%d", httpPort)
 	} else if httpsPort == tunnelPort {
-		fmt.Printf("fwdx server starting: https://%s (single port :%d)\n", hostname, httpsPort)
+		log.Printf("[fwdx] server starting: https://%s (single port :%d)", hostname, httpsPort)
 	} else {
-		fmt.Printf("fwdx server starting: https://%s (public :%d, tunnel :%d)\n", hostname, httpsPort, tunnelPort)
+		log.Printf("[fwdx] server starting: https://%s (public :%d, tunnel :%d)", hostname, httpsPort, tunnelPort)
 	}
 	return srv.Run()
 }

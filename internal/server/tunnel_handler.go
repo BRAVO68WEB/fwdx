@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -39,18 +40,21 @@ func TunnelHandler(registry *Registry, clientToken string, allowedDomains func()
 func handleRegister(w http.ResponseWriter, r *http.Request, registry *Registry, clientToken string, allowedDomains func() []string, serverHostname string) {
 	token := bearerToken(r)
 	if token == "" || token != clientToken {
+		log.Printf("[fwdx] register rejected from %s: unauthorized", r.RemoteAddr)
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
 
 	var req RegisterRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		log.Printf("[fwdx] register rejected from %s: invalid JSON", r.RemoteAddr)
 		http.Error(w, "invalid JSON", http.StatusBadRequest)
 		return
 	}
 	req.Hostname = strings.TrimSpace(strings.ToLower(req.Hostname))
 	req.Local = strings.TrimSpace(req.Local)
 	if req.Hostname == "" || req.Local == "" {
+		log.Printf("[fwdx] register rejected from %s: hostname and local required", r.RemoteAddr)
 		http.Error(w, "hostname and local required", http.StatusBadRequest)
 		return
 	}
@@ -73,6 +77,7 @@ func handleRegister(w http.ResponseWriter, r *http.Request, registry *Registry, 
 			}
 		}
 		if !domainAllowed {
+			log.Printf("[fwdx] register rejected hostname=%s from %s: domain not allowed", req.Hostname, r.RemoteAddr)
 			http.Error(w, "domain not allowed", http.StatusForbidden)
 			return
 		}
@@ -84,6 +89,7 @@ func handleRegister(w http.ResponseWriter, r *http.Request, registry *Registry, 
 		RemoteAddr: r.RemoteAddr,
 	}
 	registry.Register(req.Hostname, conn)
+	log.Printf("[fwdx] tunnel registered hostname=%s local=%s from=%s", req.Hostname, req.Local, r.RemoteAddr)
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok", "hostname": req.Hostname})
@@ -117,6 +123,7 @@ func handleNextRequest(w http.ResponseWriter, r *http.Request, registry *Registr
 	select {
 	case proxyReq, ok := <-conn.requestQueue:
 		if !ok {
+			log.Printf("[fwdx] tunnel gone hostname=%s (channel closed)", hostname)
 			http.Error(w, "tunnel closed", http.StatusGone)
 			return
 		}
