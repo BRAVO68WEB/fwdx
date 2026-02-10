@@ -21,6 +21,10 @@ go build -o fwdx .
 docker build -t fwdx .
 ```
 
+## Self-hosting (detailed guide)
+
+For a **step-by-step guide** to run the server on your own VPS (DNS, TLS with Let's Encrypt, systemd or Docker, firewall, first tunnel), see **[docs/SELFHOSTING.md](docs/SELFHOSTING.md)**.
+
 ## Quick Start
 
 ### 1. Run the server

@@ -23,7 +23,7 @@ const clientConfigFile = "client.json"
 func LoadClientConfig() (*ClientConfig, error) {
 	path := filepath.Join(GetConfigDir(), clientConfigFile)
 	data, err := os.ReadFile(path)
-	cfg := &ClientConfig{TunnelPort: 4443}
+	cfg := &ClientConfig{TunnelPort: 0} // 0 = use port from ServerURL (e.g. 443 when behind nginx)
 	if err == nil {
 		_ = json.Unmarshal(data, cfg)
 	}
@@ -56,6 +56,7 @@ func SaveClientConfig(cfg *ClientConfig) error {
 }
 
 // TunnelURL returns the URL clients use to connect for tunnel registration (host:tunnel_port).
+// If TunnelPort is 0, the port from ServerURL is used (e.g. 443 for single-port behind nginx).
 func (c *ClientConfig) TunnelURL() string {
 	u, err := url.Parse(c.ServerURL)
 	if err != nil || u.Host == "" {
@@ -64,10 +65,20 @@ func (c *ClientConfig) TunnelURL() string {
 	host := u.Hostname()
 	port := c.TunnelPort
 	if port == 0 {
-		port = 4443
+		if u.Port() != "" {
+			if p, err := strconv.Atoi(u.Port()); err == nil {
+				port = p
+			}
+		}
+		if port == 0 {
+			if u.Scheme == "https" {
+				port = 443
+			} else {
+				port = 4443
+			}
+		}
 	}
 	u.Host = host + ":" + strconv.Itoa(port)
-	// Keep scheme
 	if u.Scheme == "" {
 		u.Scheme = "https"
 	}

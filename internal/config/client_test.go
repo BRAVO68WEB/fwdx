@@ -22,8 +22,13 @@ func TestClientConfig_TunnelURL(t *testing.T) {
 			want: "https://tunnel.example.com:4443",
 		},
 		{
-			name: "zero port uses default",
+			name: "zero port uses URL port (https default 443, single-port behind nginx)",
 			cfg:  ClientConfig{ServerURL: "https://tunnel.example.com", TunnelPort: 0},
+			want: "https://tunnel.example.com:443",
+		},
+		{
+			name: "zero port with explicit 4443 in URL",
+			cfg:  ClientConfig{ServerURL: "https://tunnel.example.com:4443", TunnelPort: 0},
 			want: "https://tunnel.example.com:4443",
 		},
 		{
@@ -52,9 +57,8 @@ func TestLoadClientConfig_ReturnsDefaultTunnelPort(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Default when no config file or env is 4443
-	if cfg.TunnelPort != 4443 && cfg.TunnelPort != 0 {
-		// If file exists it might have 0; TunnelURL() treats 0 as 4443
+	// Default when no config file is 0 (use URL port in TunnelURL); file may have 4443
+	if cfg.TunnelPort != 0 && cfg.TunnelPort != 4443 {
 		t.Logf("TunnelPort = %d (may come from file)", cfg.TunnelPort)
 	}
 }
