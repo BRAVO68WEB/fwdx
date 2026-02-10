@@ -25,8 +25,9 @@ func init() {
 	serveCmd.Flags().Int("tunnel-port", 4443, "Tunnel registration port (clients connect here)")
 	serveCmd.Flags().String("client-token", "", "Token required for tunnel registration (or FWDX_CLIENT_TOKEN)")
 	serveCmd.Flags().String("admin-token", "", "Token required for admin API (or FWDX_ADMIN_TOKEN)")
-	serveCmd.Flags().String("tls-cert", "", "Path to TLS certificate file")
-	serveCmd.Flags().String("tls-key", "", "Path to TLS private key file")
+	serveCmd.Flags().String("tls-cert", "", "Path to TLS certificate file (omit when using --http-port behind nginx)")
+	serveCmd.Flags().String("tls-key", "", "Path to TLS private key file (omit when using --http-port)")
+	serveCmd.Flags().Int("http-port", 0, "Listen HTTP only on this port (single port; use when nginx terminates TLS)")
 	serveCmd.Flags().String("data-dir", dataDirDefault, "Directory for allowed_domains.json")
 }
 
@@ -47,6 +48,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 	}
 	tlsCert, _ := cmd.Flags().GetString("tls-cert")
 	tlsKey, _ := cmd.Flags().GetString("tls-key")
+	httpPort, _ := cmd.Flags().GetInt("http-port")
 	dataDir, _ := cmd.Flags().GetString("data-dir")
 
 	if hostname == "" {
@@ -55,14 +57,18 @@ func runServe(cmd *cobra.Command, args []string) error {
 	if clientToken == "" {
 		return fmt.Errorf("client-token is required (--client-token or FWDX_CLIENT_TOKEN)")
 	}
-	if tlsCert == "" || tlsKey == "" {
-		return fmt.Errorf("tls-cert and tls-key are required")
+	if httpPort == 0 && (tlsCert == "" || tlsKey == "") {
+		return fmt.Errorf("tls-cert and tls-key are required (or use --http-port when behind a reverse proxy)")
+	}
+	if httpPort != 0 && (tlsCert != "" || tlsKey != "") {
+		return fmt.Errorf("do not set tls-cert/tls-key when using --http-port")
 	}
 
 	cfg := server.Config{
 		Hostname:    hostname,
 		HTTPSPort:   httpsPort,
 		TunnelPort:  tunnelPort,
+		HTTPPort:    httpPort,
 		ClientToken: clientToken,
 		AdminToken:  adminToken,
 		TLSCertFile: tlsCert,
@@ -75,6 +81,12 @@ func runServe(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	fmt.Printf("fwdx server starting: https://%s (public :%d, tunnel :%d)\n", hostname, httpsPort, tunnelPort)
+	if httpPort != 0 {
+		fmt.Printf("fwdx server starting (HTTP, behind proxy): http://:%d\n", httpPort)
+	} else if httpsPort == tunnelPort {
+		fmt.Printf("fwdx server starting: https://%s (single port :%d)\n", hostname, httpsPort)
+	} else {
+		fmt.Printf("fwdx server starting: https://%s (public :%d, tunnel :%d)\n", hostname, httpsPort, tunnelPort)
+	}
 	return srv.Run()
 }
