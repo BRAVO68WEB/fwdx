@@ -1,7 +1,7 @@
-#!/usr/bin/env bash
+#!/bin/sh
 # Docker-based e2e: start server, app, client; curl public URL; assert response; teardown.
 set -e
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 COMPOSE_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$COMPOSE_DIR"
 
