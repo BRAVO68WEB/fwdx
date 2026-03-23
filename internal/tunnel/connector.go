@@ -3,11 +3,16 @@ package tunnel
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
+	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
+	"time"
 
 	tunnelv1 "github.com/BRAVO68WEB/fwdx/api/tunnel/v1"
 	"google.golang.org/grpc"
@@ -15,6 +20,19 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
 )
+
+func maxProxyBodyBytes() int {
+	const def = 64 << 20
+	v := strings.TrimSpace(os.Getenv("FWDX_MAX_PROXY_BODY_BYTES"))
+	if v == "" {
+		return def
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n <= 0 {
+		return def
+	}
+	return n
+}
 
 // Connect runs the tunnel client over gRPC: register, then receive ProxyRequests and send ProxyResponses.
 // tunnelURL is the gRPC endpoint (e.g. https://tunnel.example.com:4443). Token is sent in gRPC metadata.
@@ -35,7 +53,13 @@ func Connect(ctx context.Context, tunnelURL, token, hostname, localURL string, d
 	}
 	target := host + ":" + port
 
-	opts := []grpc.DialOption{}
+	maxBody := maxProxyBodyBytes()
+	opts := []grpc.DialOption{
+		grpc.WithDefaultCallOptions(
+			grpc.MaxCallRecvMsgSize(maxBody+(1<<20)),
+			grpc.MaxCallSendMsgSize(maxBody+(1<<20)),
+		),
+	}
 	if u.Scheme == "https" {
 		tlsCfg := &tls.Config{}
 		if s := os.Getenv("FWDX_INSECURE_SKIP_VERIFY"); s == "1" || strings.EqualFold(s, "true") {
@@ -92,6 +116,9 @@ func Connect(ctx context.Context, tunnelURL, token, hostname, localURL string, d
 	for {
 		msg, err := stream.Recv()
 		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return nil
+			}
 			return err
 		}
 		preq := msg.GetProxyRequest()
@@ -111,9 +138,39 @@ func Connect(ctx context.Context, tunnelURL, token, hostname, localURL string, d
 			pr.Header.Set(k, v)
 		}
 
-		resp := ProxyToLocal(localURL, pr)
-		if resp == nil {
-			resp = &ProxyResp{ID: pr.ID, Status: 502, Body: []byte("bad gateway")}
+		var resp *ProxyResp
+		var proxyErr error
+		for attempt := 0; attempt < 4; attempt++ {
+			resp, proxyErr = ProxyToLocal(localURL, pr)
+			if proxyErr == nil {
+				break
+			}
+			if !errors.Is(proxyErr, ErrLocalTransport) || !IsIdempotentMethod(pr.Method) || attempt == 3 {
+				break
+			}
+			if debug {
+				log.Printf("[fwdx] local transport retry id=%s method=%s attempt=%d err=%v", pr.ID, pr.Method, attempt+1, proxyErr)
+			}
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(150 * time.Millisecond):
+			}
+		}
+		if proxyErr != nil {
+			if debug {
+				log.Printf("[fwdx] local proxy failed id=%s method=%s err=%v", pr.ID, pr.Method, proxyErr)
+			}
+			body := []byte("bad gateway")
+			if errors.Is(proxyErr, ErrLocalResponseTooLarge) {
+				body = []byte("local response too large")
+			}
+			resp = &ProxyResp{
+				ID:     pr.ID,
+				Status: http.StatusBadGateway,
+				Body:   body,
+				Header: make(http.Header),
+			}
 		}
 
 		headers := make(map[string]string)

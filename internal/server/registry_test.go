@@ -110,3 +110,19 @@ func TestRegistry_MultipleHosts(t *testing.T) {
 		t.Errorf("List() = %v", list)
 	}
 }
+
+func TestRegistry_RegisterIfAbsent(t *testing.T) {
+	r := NewRegistry()
+	ok := r.RegisterIfAbsent("x.example.com", &mockConn{remoteAddr: "1"})
+	if !ok {
+		t.Fatal("expected first register to succeed")
+	}
+	ok = r.RegisterIfAbsent("x.example.com", &mockConn{remoteAddr: "2"})
+	if ok {
+		t.Fatal("expected second register to be rejected")
+	}
+	got := r.Get("x.example.com")
+	if got == nil || got.GetRemoteAddr() != "1" {
+		t.Fatalf("unexpected conn after conflict: %+v", got)
+	}
+}

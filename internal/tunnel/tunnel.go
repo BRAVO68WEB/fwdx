@@ -12,10 +12,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/BRAVO68WEB/fwdx/internal/config"
@@ -23,7 +24,7 @@ import (
 )
 
 var (
-	errClientConfigRequired = errors.New("client config required: set FWDX_SERVER and FWDX_TOKEN or ~/.fwdx/client.json")
+	errClientConfigRequired   = errors.New("client config required: set FWDX_SERVER and FWDX_TOKEN or ~/.fwdx/client.json")
 	errServerHostnameRequired = errors.New("server hostname required for subdomain (set FWDX_SERVER or server_hostname in client.json)")
 )
 
@@ -43,15 +44,12 @@ type Tunnel struct {
 
 type Manager struct {
 	tunnelsDir string
-	mu         sync.Mutex
-	running    map[string]context.CancelFunc
 }
 
 func NewManager() *Manager {
 	home, _ := homedir.Dir()
 	return &Manager{
 		tunnelsDir: filepath.Join(home, ".fwdx", "tunnels"),
-		running:    make(map[string]context.CancelFunc),
 	}
 }
 
@@ -124,6 +122,10 @@ func (m *Manager) Get(name string) (*Tunnel, error) {
 		return nil, err
 	}
 	t.ConfigPath = configPath
+	if st, ok := runtimeStateIfRunning(name); ok {
+		t.Running = true
+		t.PID = st.PID
+	}
 	return &t, nil
 }
 
@@ -148,16 +150,16 @@ func (m *Manager) List() ([]*Tunnel, error) {
 		if t.Hostname == "" {
 			continue
 		}
-		m.mu.Lock()
-		_, running := m.running[t.Name]
-		m.mu.Unlock()
-		t.Running = running
+		if st, ok := runtimeStateIfRunning(t.Name); ok {
+			t.Running = true
+			t.PID = st.PID
+		}
 		tunnels = append(tunnels, t)
 	}
 	return tunnels, nil
 }
 
-func (m *Manager) Start(name string, watch, debug bool) error {
+func (m *Manager) Start(name string, debug bool) error {
 	t, err := m.Get(name)
 	if err != nil {
 		return err
@@ -167,50 +169,132 @@ func (m *Manager) Start(name string, watch, debug bool) error {
 		return errClientConfigRequired
 	}
 
-	m.mu.Lock()
-	if _, ok := m.running[name]; ok {
-		m.mu.Unlock()
+	if _, ok := runtimeStateIfRunning(name); ok {
 		return fmt.Errorf("tunnel %s is already running", name)
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	m.running[name] = cancel
-	m.mu.Unlock()
 
 	tunnelURL := cfg.TunnelURL()
 	localURL := "http://" + t.Local
+	ctx := context.Background()
+	return Connect(ctx, tunnelURL, cfg.Token, t.Hostname, localURL, debug)
+}
 
-	if watch || debug {
-		defer func() {
-			m.mu.Lock()
-			delete(m.running, name)
-			m.mu.Unlock()
-			cancel()
-		}()
-		return Connect(ctx, tunnelURL, cfg.Token, t.Hostname, localURL, debug)
+func (m *Manager) StartDetached(name string, debug bool) (*RuntimeState, error) {
+	t, err := m.Get(name)
+	if err != nil {
+		return nil, err
+	}
+	cfg, err := config.LoadClientConfig()
+	if err != nil || cfg == nil || cfg.ServerURL == "" || cfg.Token == "" {
+		return nil, errClientConfigRequired
+	}
+	if _, ok := runtimeStateIfRunning(name); ok {
+		return nil, fmt.Errorf("tunnel %s is already running", name)
+	}
+	_ = os.MkdirAll(runtimeDir(), 0755)
+
+	logPath := runtimeLogPath(name)
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
+	if err != nil {
+		return nil, err
+	}
+	defer logFile.Close()
+
+	exe, err := os.Executable()
+	if err != nil {
+		return nil, err
+	}
+	args := []string{"tunnel", "start", name, "--watch"}
+	if debug {
+		args = append(args, "--debug")
+	}
+	cmd := exec.Command(exe, args...)
+	cmd.Stdout = logFile
+	cmd.Stderr = logFile
+	cmd.Stdin = nil
+	if err := cmd.Start(); err != nil {
+		return nil, err
 	}
 
-	go func() {
-		_ = Connect(ctx, tunnelURL, cfg.Token, t.Hostname, localURL, debug)
-		m.mu.Lock()
-		delete(m.running, name)
-		m.mu.Unlock()
-		cancel()
-	}()
-	return nil
+	st := &RuntimeState{
+		Name:      name,
+		Hostname:  t.Hostname,
+		Local:     t.Local,
+		PID:       cmd.Process.Pid,
+		LogPath:   logPath,
+		StartedAt: time.Now(),
+	}
+	if err := writeRuntimeState(st); err != nil {
+		_ = cmd.Process.Kill()
+		return nil, err
+	}
+	return st, nil
 }
 
 func (m *Manager) Stop(name string) error {
-	m.mu.Lock()
-	cancel, ok := m.running[name]
-	if ok {
-		delete(m.running, name)
-		cancel()
-	}
-	m.mu.Unlock()
+	st, ok := runtimeStateIfRunning(name)
 	if !ok {
+		// stale or missing state
+		removeRuntimeState(name)
 		return fmt.Errorf("tunnel %s is not running", name)
 	}
+	if err := stopPID(st.PID, 5*time.Second); err != nil {
+		return err
+	}
+	removeRuntimeState(name)
 	return nil
+}
+
+func (m *Manager) RuntimeState(name string) (*RuntimeState, bool) {
+	return runtimeStateIfRunning(name)
+}
+
+func (m *Manager) TailLogs(name string, w io.Writer, lines int, follow bool) error {
+	if lines <= 0 {
+		lines = 100
+	}
+	st, ok := runtimeStateIfRunning(name)
+	logPath := runtimeLogPath(name)
+	if ok && st.LogPath != "" {
+		logPath = st.LogPath
+	}
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		return fmt.Errorf("read logs: %w", err)
+	}
+	all := strings.Split(string(data), "\n")
+	if len(all) > 0 && all[len(all)-1] == "" {
+		all = all[:len(all)-1]
+	}
+	start := 0
+	if len(all) > lines {
+		start = len(all) - lines
+	}
+	_, _ = io.WriteString(w, strings.Join(all[start:], "\n"))
+	if !follow {
+		return nil
+	}
+	f, err := os.Open(logPath)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	pos, _ := f.Seek(0, io.SeekEnd)
+	buf := make([]byte, 4096)
+	for {
+		n, err := f.ReadAt(buf, pos)
+		if n > 0 {
+			_, _ = w.Write(buf[:n])
+			pos += int64(n)
+		}
+		if err != nil && !errors.Is(err, io.EOF) {
+			return err
+		}
+		time.Sleep(250 * time.Millisecond)
+		if _, running := runtimeStateIfRunning(name); !running {
+			return nil
+		}
+	}
 }
 
 func (m *Manager) Delete(name string, force bool) error {
@@ -218,12 +302,15 @@ func (m *Manager) Delete(name string, force bool) error {
 	if err != nil {
 		return err
 	}
-	m.mu.Lock()
-	if cancel, ok := m.running[name]; ok {
-		delete(m.running, name)
-		cancel()
+	if _, ok := runtimeStateIfRunning(name); ok {
+		if !force {
+			return fmt.Errorf("tunnel %s is running; stop it first or use --force", name)
+		}
+		if err := m.Stop(name); err != nil {
+			return err
+		}
 	}
-	m.mu.Unlock()
+	removeRuntimeState(name)
 	_ = os.Remove(t.ConfigPath)
 	return nil
 }

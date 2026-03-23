@@ -25,12 +25,12 @@ const (
 
 // testEnv holds a running gRPC + web server and shared registry/domains for e2e tests.
 type testEnv struct {
-	Reg       *server.Registry
-	Domains   *DomainStore
-	GrpcAddr  string
-	WebURL    string
-	grpcLn    net.Listener
-	webSrv    *httptest.Server
+	Reg        *server.Registry
+	Domains    *DomainStore
+	GrpcAddr   string
+	WebURL     string
+	grpcLn     net.Listener
+	webSrv     *httptest.Server
 	cancelGrpc context.CancelFunc
 }
 
@@ -56,10 +56,10 @@ func startTestEnv(t *testing.T) *testEnv {
 
 	env := &testEnv{
 		Reg: reg, Domains: domains,
-		GrpcAddr: grpcLn.Addr().String(),
-		WebURL:   webSrv.URL,
-		grpcLn:   grpcLn,
-		webSrv:   webSrv,
+		GrpcAddr:   grpcLn.Addr().String(),
+		WebURL:     webSrv.URL,
+		grpcLn:     grpcLn,
+		webSrv:     webSrv,
 		cancelGrpc: cancel,
 	}
 	t.Cleanup(func() {
@@ -174,7 +174,11 @@ func TestE2E_Proxy_SubdomainTunnel(t *testing.T) {
 	}
 
 	cancel()
-	select { case <-done: case <-time.After(2 * time.Second): t.Log("tunnel exit timeout") }
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Log("tunnel exit timeout")
+	}
 }
 
 func TestE2E_Proxy_POSTWithBody(t *testing.T) {
@@ -518,6 +522,29 @@ func TestE2E_Tunnel_CustomDomain_Allowed(t *testing.T) {
 	body, _ := io.ReadAll(resp.Body)
 	if !bytes.Equal(body, localBody) {
 		t.Errorf("body = %q, want %q", body, localBody)
+	}
+}
+
+func TestE2E_Tunnel_HostnameConflictRejected(t *testing.T) {
+	env := startTestEnv(t)
+	localA := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("a")) }))
+	defer localA.Close()
+	localB := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("b")) }))
+	defer localB.Close()
+
+	ctxA, cancelA := context.WithCancel(context.Background())
+	defer cancelA()
+	env.runTunnel(ctxA, "dup."+testHostname, localA.URL)
+	time.Sleep(200 * time.Millisecond)
+
+	ctxB, cancelB := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancelB()
+	err := tunnel.Connect(ctxB, "http://"+env.GrpcAddr, testClientToken, "dup."+testHostname, localB.URL, false)
+	if err == nil {
+		t.Fatal("expected hostname conflict error")
+	}
+	if !bytes.Contains([]byte(err.Error()), []byte("hostname_conflict")) {
+		t.Fatalf("expected hostname_conflict, got %v", err)
 	}
 }
 

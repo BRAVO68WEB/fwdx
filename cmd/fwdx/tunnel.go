@@ -39,12 +39,13 @@ var tunnelCreateCmd = &cobra.Command{
 
 var tunnelStartCmd = &cobra.Command{
 	Use:   "start <name>",
-	Short: "Start a tunnel",
+	Short: "Start a tunnel (foreground by default, or detached with --detach)",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		watch, _ := cmd.Flags().GetBool("watch")
+		detach, _ := cmd.Flags().GetBool("detach")
 		debug, _ := cmd.Flags().GetBool("debug")
-		return handleTunnelStart(args[0], watch, debug)
+		return handleTunnelStart(args[0], watch, detach, debug)
 	},
 }
 
@@ -94,7 +95,8 @@ func init() {
 	tunnelCreateCmd.Flags().String("name", "", "Custom tunnel name")
 
 	// tunnel start flags
-	tunnelStartCmd.Flags().BoolP("watch", "w", false, "Run in foreground and stream logs")
+	tunnelStartCmd.Flags().BoolP("watch", "w", false, "Run in foreground and stream logs (default behavior)")
+	tunnelStartCmd.Flags().Bool("detach", false, "Run tunnel in background and persist runtime state")
 	tunnelStartCmd.Flags().BoolP("debug", "d", false, "Run in foreground with debug logs")
 
 	// tunnel list flags
@@ -126,16 +128,25 @@ func handleTunnelCreate(local, subdomain, url string, private bool, name string)
 	return nil
 }
 
-func handleTunnelStart(name string, watch, debug bool) error {
+func handleTunnelStart(name string, watch, detach, debug bool) error {
 	manager := tunnel.NewManager()
-	err := manager.Start(name, watch, debug)
-	if err != nil {
-		return output.PrintError(fmt.Sprintf("Failed to start tunnel: %v", err))
+	if detach && watch {
+		return output.PrintError("use either --detach or --watch, not both")
 	}
-
-	// Only print success when running in background (not watch/debug foreground)
-	if !watch && !debug {
-		output.PrintSuccess(fmt.Sprintf("✅ Tunnel '%s' started", name))
+	if detach {
+		st, err := manager.StartDetached(name, debug)
+		if err != nil {
+			return output.PrintError(fmt.Sprintf("Failed to start tunnel: %v", err))
+		}
+		output.PrintSuccess(fmt.Sprintf("✅ Tunnel '%s' started in background", name))
+		fmt.Printf("   PID:      %d\n", st.PID)
+		fmt.Printf("   Hostname: https://%s\n", st.Hostname)
+		fmt.Printf("   Local:    http://%s\n", st.Local)
+		fmt.Printf("   Logs:     %s\n", st.LogPath)
+		return nil
+	}
+	if err := manager.Start(name, debug); err != nil {
+		return output.PrintError(fmt.Sprintf("Failed to start tunnel: %v", err))
 	}
 	return nil
 }

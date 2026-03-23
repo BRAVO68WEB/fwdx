@@ -1,6 +1,6 @@
 # fwdx
 
-Self-hosted tunneling CLI and server for exposing local HTTP services by hostname (like ngrok or cloudflared, but your own server).
+Self-hosted tunneling CLI and server for exposing local HTTP services by hostname over gRPC (like ngrok or cloudflared, but your own server).
 
 ## Installation
 
@@ -29,37 +29,38 @@ For a **step-by-step guide** to run the server on your own VPS (DNS, TLS with Le
 
 ### 1. Run the server
 
-On a machine with a public IP and a hostname (e.g. `tunnel.example.com`):
+On a machine with a public IP and a hostname (e.g. `tunnel.myweb.site`):
 
 ```bash
 # TLS cert and key required (e.g. from Let's Encrypt or self-signed for dev)
-export FWDX_HOSTNAME=tunnel.example.com
+export FWDX_HOSTNAME=tunnel.myweb.site
 export FWDX_CLIENT_TOKEN=your-client-token
 export FWDX_ADMIN_TOKEN=your-admin-token
 fwdx serve --hostname $FWDX_HOSTNAME --client-token $FWDX_CLIENT_TOKEN --admin-token $FWDX_ADMIN_TOKEN --tls-cert /path/to/cert.pem --tls-key /path/to/key.pem
 ```
 
-First-time DNS: create an **A** record: `tunnel.example.com` -> your server IP.
+First-time DNS: create an **A** record: `tunnel.myweb.site` -> your server IP.
+Also create wildcard DNS for subdomains: `*.tunnel.myweb.site` -> your server IP.
 
 ### 2. Add allowed domains (optional)
 
 To use a custom domain (e.g. `app.my.domain`) instead of a subdomain under the server hostname:
 
 ```bash
-fwdx domains add my.domain --server https://tunnel.example.com --admin-token $FWDX_ADMIN_TOKEN
+fwdx domains add my.domain --server https://tunnel.myweb.site --admin-token $FWDX_ADMIN_TOKEN
 ```
 
-Then create a **CNAME** record: `*.my.domain` -> `tunnel.example.com`.
+Then create a **CNAME** record: `*.my.domain` -> `tunnel.myweb.site`.
 
 ### 3. Create and start a tunnel (client)
 
 On your laptop or dev machine:
 
 ```bash
-export FWDX_SERVER=https://tunnel.example.com
+export FWDX_SERVER=https://tunnel.myweb.site
 export FWDX_TOKEN=your-client-token
 
-# Subdomain under server hostname (e.g. myapp.tunnel.example.com)
+# Subdomain under server hostname (e.g. myapp.tunnel.myweb.site)
 fwdx tunnel create -l localhost:8080 -s myapp --name myapp
 fwdx tunnel start myapp
 
@@ -68,7 +69,7 @@ fwdx tunnel create -l localhost:8080 -u app.my.domain --name myapp
 fwdx tunnel start myapp
 ```
 
-Access at `https://myapp.tunnel.example.com` or `https://app.my.domain`.
+Access at `https://myapp.tunnel.myweb.site` or `https://app.my.domain`.
 
 ## Commands
 
@@ -82,8 +83,9 @@ Access at `https://myapp.tunnel.example.com` or `https://app.my.domain`.
 
 ### Client
 - `fwdx tunnel create` - Create a tunnel (--local, --subdomain or --url, --name)
-- `fwdx tunnel start <name>` - Start a tunnel (--watch, --debug for foreground)
+- `fwdx tunnel start <name>` - Start tunnel in foreground (use `--detach` for background)
 - `fwdx tunnel stop <name>` - Stop a tunnel
+- `fwdx logs <name>` - Show detached tunnel logs (`--follow`)
 - `fwdx tunnel list` - List tunnels
 - `fwdx tunnel delete <name>` - Delete a tunnel
 - `fwdx config` - Show client config (FWDX_SERVER, FWDX_TOKEN)
@@ -91,9 +93,11 @@ Access at `https://myapp.tunnel.example.com` or `https://app.my.domain`.
 
 ## Configuration
 
-**Client:** Set `FWDX_SERVER` and `FWDX_TOKEN` (or create `~/.fwdx/client.json` with `server_url` and `token`). Optional: `server_hostname`, `tunnel_port` (default 4443).
+**Client:** Set `FWDX_SERVER` and `FWDX_TOKEN` (or create `~/.fwdx/client.json` with `server_url` and `token`). Optional: `server_hostname`, `tunnel_port` (default 4443), `FWDX_MAX_PROXY_BODY_BYTES`, `FWDX_MAX_RESPONSE_BODY_BYTES`.
 
-**Server:** Set `FWDX_HOSTNAME`, `FWDX_CLIENT_TOKEN`, `FWDX_ADMIN_TOKEN` or pass via flags. TLS cert and key are required.
+**Server:** Set `FWDX_HOSTNAME`, `FWDX_CLIENT_TOKEN`, `FWDX_ADMIN_TOKEN` or pass via flags. TLS cert and key are required in direct mode. Admin token is for admin APIs only; tunnel clients authenticate with client token.
+
+Current protocol scope: HTTP forwarding and SSE are supported; WebSocket upgrade is currently returned as `501 Not Implemented`.
 
 ## CI & Releases
 

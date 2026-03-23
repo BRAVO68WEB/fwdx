@@ -5,6 +5,8 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -16,6 +18,19 @@ import (
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/peer"
 )
+
+func maxProxyBodyBytes() int {
+	const def = 64 << 20
+	v := strings.TrimSpace(os.Getenv("FWDX_MAX_PROXY_BODY_BYTES"))
+	if v == "" {
+		return def
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n <= 0 {
+		return def
+	}
+	return n
+}
 
 // GrpcTunnelConn implements TunnelConnection over a gRPC bidirectional stream.
 type GrpcTunnelConn struct {
@@ -114,10 +129,10 @@ func (c *GrpcTunnelConn) Close() {
 // grpcTunnelServer implements tunnelv1.TunnelServiceServer.
 type grpcTunnelServer struct {
 	tunnelv1.UnimplementedTunnelServiceServer
-	registry        *Registry
-	clientToken     string
-	allowedDomains  func() []string
-	serverHostname  string
+	registry       *Registry
+	clientToken    string
+	allowedDomains func() []string
+	serverHostname string
 }
 
 func newGrpcTunnelServer(registry *Registry, clientToken string, allowedDomains func() []string, serverHostname string) *grpcTunnelServer {
@@ -194,7 +209,17 @@ func (s *grpcTunnelServer) Connect(stream grpc.BidiStreamingServer[tunnelv1.Clie
 		sendCh:     make(chan *tunnelv1.ServerMessage, 64),
 		pending:    make(map[string]chan *ProxyResponse),
 	}
-	s.registry.Register(hostname, conn)
+	if ok := s.registry.RegisterIfAbsent(hostname, conn); !ok {
+		_ = stream.Send(&tunnelv1.ServerMessage{
+			Message: &tunnelv1.ServerMessage_RegisterAck{
+				RegisterAck: &tunnelv1.RegisterAck{
+					Ok:    false,
+					Error: "hostname_conflict: hostname already active",
+				},
+			},
+		})
+		return nil
+	}
 	defer func() {
 		conn.Close()
 		s.registry.Unregister(hostname)
@@ -250,7 +275,11 @@ func (s *grpcTunnelServer) Connect(stream grpc.BidiStreamingServer[tunnelv1.Clie
 // RunGrpcServer runs the gRPC tunnel server on the given listener (TLS or plain).
 // Exported for tests that need to run gRPC with a custom registry.
 func RunGrpcServer(ln net.Listener, registry *Registry, clientToken string, allowedDomains func() []string, serverHostname string, useTLS bool, certFile, keyFile string) error {
-	opts := []grpc.ServerOption{}
+	maxBody := maxProxyBodyBytes()
+	opts := []grpc.ServerOption{
+		grpc.MaxRecvMsgSize(maxBody + (1 << 20)),
+		grpc.MaxSendMsgSize(maxBody + (1 << 20)),
+	}
 	if useTLS && certFile != "" && keyFile != "" {
 		creds, err := credentials.NewServerTLSFromFile(certFile, keyFile)
 		if err != nil {

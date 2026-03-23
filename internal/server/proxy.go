@@ -3,12 +3,35 @@ package server
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"os"
+	"strconv"
 	"strings"
 	"time"
 )
+
+func maxRequestBodyBytes() int64 {
+	const def = int64(64 << 20) // 64MiB
+	v := strings.TrimSpace(os.Getenv("FWDX_MAX_REQUEST_BODY_BYTES"))
+	if v == "" {
+		return def
+	}
+	n, err := strconv.ParseInt(v, 10, 64)
+	if err != nil || n <= 0 {
+		return def
+	}
+	return n
+}
+
+func isWebsocketUpgrade(r *http.Request) bool {
+	if !strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
+		return false
+	}
+	return strings.Contains(strings.ToLower(r.Header.Get("Connection")), "upgrade")
+}
 
 // ProxyHandler handles incoming public HTTPS requests and forwards them to the appropriate tunnel.
 // When the request Host matches serverHostname exactly, a short info page is returned instead of 404.
@@ -31,8 +54,22 @@ func ProxyHandler(registry *Registry, serverHostname string) http.HandlerFunc {
 			return
 		}
 
-		body, _ := io.ReadAll(r.Body)
+		if isWebsocketUpgrade(r) {
+			http.Error(w, "websocket tunneling is not implemented in this release", http.StatusNotImplemented)
+			return
+		}
+
+		maxBody := maxRequestBodyBytes()
+		if r.ContentLength > maxBody {
+			http.Error(w, fmt.Sprintf("request body too large (max %d bytes)", maxBody), http.StatusRequestEntityTooLarge)
+			return
+		}
+		body, _ := io.ReadAll(io.LimitReader(r.Body, maxBody+1))
 		_ = r.Body.Close()
+		if int64(len(body)) > maxBody {
+			http.Error(w, fmt.Sprintf("request body too large (max %d bytes)", maxBody), http.StatusRequestEntityTooLarge)
+			return
+		}
 
 		pr := &ProxyRequest{
 			Method: r.Method,

@@ -1,5 +1,7 @@
 # Design: gRPC bidirectional tunnel (extra port)
 
+> Historical design note: this migration is complete in current codebase. `fwdx` now uses gRPC tunnel transport as the single supported protocol.
+
 ## Why change?
 
 The current design uses **HTTP long-poll**: the client repeatedly does GET `/tunnel/next-request` and blocks until the server has a request. Each request/response is a separate HTTP round-trip. That works but:
