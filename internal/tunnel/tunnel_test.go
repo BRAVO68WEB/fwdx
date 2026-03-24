@@ -2,6 +2,9 @@ package tunnel
 
 import (
 	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -28,9 +31,6 @@ func TestNewManager(t *testing.T) {
 	}
 	if m.tunnelsDir == "" {
 		t.Error("tunnelsDir not set")
-	}
-	if m.running == nil {
-		t.Error("running map not initialized")
 	}
 }
 
@@ -157,51 +157,24 @@ func TestManager_Stop_NotRunning(t *testing.T) {
 	}
 }
 
-func TestManager_Start_Stop_Cancel(t *testing.T) {
+func TestManager_Start_AlreadyRunning_StateFile(t *testing.T) {
 	defer setTestEnv(t)()
-
-	m := NewManager()
-	_, err := m.Create("localhost:8080", "startstop", "", false, "startstop-tunnel")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// Start runs connector in goroutine; it will fail to connect to real server and may exit quickly.
-	err = m.Start("startstop-tunnel", false, false)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	time.Sleep(30 * time.Millisecond)
-
-	// Stop may succeed (if connector still in map) or fail with "not running" (if connector already exited).
-	err = m.Stop("startstop-tunnel")
-	if err != nil {
-		t.Logf("Stop returned %v (connector may have exited already)", err)
-	}
-
-	// Second stop should always error
-	err = m.Stop("startstop-tunnel")
-	if err == nil {
-		t.Error("second Stop should error")
-	}
-}
-
-func TestManager_Start_AlreadyRunning(t *testing.T) {
-	defer setTestEnv(t)()
-
 	m := NewManager()
 	_, _ = m.Create("localhost:8080", "dup", "", false, "dup-tunnel")
-	_ = m.Start("dup-tunnel", false, false)
-	defer m.Stop("dup-tunnel")
-
-	// Call second Start immediately; the first goroutine may still be in m.running
-	// (or may have exited if connection failed quickly). If it's still there we get error.
-	err := m.Start("dup-tunnel", false, false)
+	if err := writeRuntimeState(&RuntimeState{
+		Name:      "dup-tunnel",
+		Hostname:  "dup.tunnel.example.com",
+		Local:     "localhost:8080",
+		PID:       os.Getpid(),
+		LogPath:   runtimeLogPath("dup-tunnel"),
+		StartedAt: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	defer removeRuntimeState("dup-tunnel")
+	err := m.Start("dup-tunnel", false)
 	if err == nil {
-		// Connector may have already exited (e.g. connection refused), so second Start succeeded.
-		// This is acceptable; we only assert that double-start doesn't panic.
-		t.Log("second Start succeeded (first connector may have exited already)")
+		t.Fatal("expected already running error")
 	}
 }
 
@@ -218,5 +191,61 @@ func TestManager_Delete_NotFound(t *testing.T) {
 	err := m.Delete("nonexistent", false)
 	if err == nil {
 		t.Error("Delete(nonexistent) should error")
+	}
+}
+
+func TestTailLogs_ReadsRecentLines(t *testing.T) {
+	defer setTestEnv(t)()
+	m := NewManager()
+	if err := os.MkdirAll(runtimeDir(), 0755); err != nil {
+		t.Fatal(err)
+	}
+	logPath := runtimeLogPath("logtest")
+	content := "1\n2\n3\n4\n5\n"
+	if err := os.WriteFile(logPath, []byte(content), 0600); err != nil {
+		t.Fatal(err)
+	}
+	var b strings.Builder
+	if err := m.TailLogs("logtest", &b, 2, false); err != nil {
+		t.Fatal(err)
+	}
+	out := b.String()
+	if !strings.Contains(out, "4") || !strings.Contains(out, "5") {
+		t.Fatalf("unexpected output: %q", out)
+	}
+}
+
+func TestRuntimeStatePath(t *testing.T) {
+	defer setTestEnv(t)()
+	p := runtimeStatePath("abc")
+	if filepath.Ext(p) != ".json" {
+		t.Fatalf("state path should end with .json, got %s", p)
+	}
+}
+
+func TestManager_Stop_UsesRuntimeStatePID(t *testing.T) {
+	defer setTestEnv(t)()
+	cmd := exec.Command("sleep", "5")
+	if err := cmd.Start(); err != nil {
+		t.Skipf("sleep command unavailable: %v", err)
+	}
+	defer func() { _ = cmd.Process.Kill() }()
+
+	if err := writeRuntimeState(&RuntimeState{
+		Name:      "stoptest",
+		Hostname:  "stop.tunnel.example.com",
+		Local:     "localhost:8080",
+		PID:       cmd.Process.Pid,
+		LogPath:   runtimeLogPath("stoptest"),
+		StartedAt: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	m := NewManager()
+	if err := m.Stop("stoptest"); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := runtimeStateIfRunning("stoptest"); ok {
+		t.Fatal("expected state removed after stop")
 	}
 }

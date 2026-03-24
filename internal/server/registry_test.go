@@ -110,3 +110,33 @@ func TestRegistry_MultipleHosts(t *testing.T) {
 		t.Errorf("List() = %v", list)
 	}
 }
+
+func TestRegistry_RegisterIfAbsent(t *testing.T) {
+	r := NewRegistry()
+	ok := r.RegisterIfAbsent("x.example.com", &mockConn{remoteAddr: "1"})
+	if !ok {
+		t.Fatal("expected first register to succeed")
+	}
+	ok = r.RegisterIfAbsent("x.example.com", &mockConn{remoteAddr: "2"})
+	if ok {
+		t.Fatal("expected second register to be rejected")
+	}
+	got := r.Get("x.example.com")
+	if got == nil || got.GetRemoteAddr() != "1" {
+		t.Fatalf("unexpected conn after conflict: %+v", got)
+	}
+}
+
+func TestRegistry_Disconnect(t *testing.T) {
+	r := NewRegistry()
+	r.Register("x.example.com", &mockConn{remoteAddr: "1.2.3.4"})
+	if ok := r.Disconnect("x.example.com"); !ok {
+		t.Fatal("expected disconnect success")
+	}
+	if r.Get("x.example.com") != nil {
+		t.Fatal("expected tunnel removed")
+	}
+	if ok := r.Disconnect("x.example.com"); ok {
+		t.Fatal("expected disconnect false for missing host")
+	}
+}

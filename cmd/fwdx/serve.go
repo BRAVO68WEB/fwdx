@@ -21,7 +21,7 @@ func init() {
 	home, _ := homedir.Dir()
 	dataDirDefault := home + "/.fwdx-server"
 
-	serveCmd.Flags().String("hostname", "", "Server public hostname (e.g. tunnel.example.com)")
+	serveCmd.Flags().String("hostname", "", "Server public hostname (e.g. tunnel.myweb.site)")
 	serveCmd.Flags().Int("web-port", 8080, "Port for HTTP/HTTPS (proxy + admin). Nginx forwards 443 here.")
 	serveCmd.Flags().Int("grpc-port", 4440, "Port for gRPC tunnel. Nginx forwards gRPC stream here.")
 	serveCmd.Flags().String("client-token", "", "Token for tunnel clients (or FWDX_CLIENT_TOKEN)")

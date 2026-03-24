@@ -2,8 +2,10 @@ package server
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -114,5 +116,90 @@ func TestProxyHandler_HostWithPort(t *testing.T) {
 	// Lookup should use host without port; we get 502 because no one responds to the queue
 	if rec.Code != http.StatusBadGateway {
 		t.Errorf("status = %d (host with port should still resolve)", rec.Code)
+	}
+}
+
+func TestProxyHandler_WebsocketNotImplemented(t *testing.T) {
+	reg := NewRegistry()
+	reg.Register("app.example.com", &blockingConn{})
+	handler := ProxyHandler(reg, "tunnel.example.com")
+
+	req := httptest.NewRequest(http.MethodGet, "https://app.example.com/ws", nil)
+	req.Host = "app.example.com"
+	req.Header.Set("Connection", "Upgrade")
+	req.Header.Set("Upgrade", "websocket")
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotImplemented {
+		t.Fatalf("status = %d, want 501", rec.Code)
+	}
+}
+
+func TestProxyHandler_RequestBodyTooLarge(t *testing.T) {
+	_ = os.Setenv("FWDX_MAX_REQUEST_BODY_BYTES", "8")
+	defer os.Unsetenv("FWDX_MAX_REQUEST_BODY_BYTES")
+
+	reg := NewRegistry()
+	reg.Register("app.example.com", &blockingConn{})
+	handler := ProxyHandler(reg, "tunnel.example.com")
+
+	req := httptest.NewRequest(http.MethodPost, "https://app.example.com/upload", strings.NewReader("123456789"))
+	req.Host = "app.example.com"
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want 413", rec.Code)
+	}
+}
+
+type captureConn struct {
+	last *ProxyRequest
+}
+
+func (c *captureConn) EnqueueRequest(_ context.Context, pr *ProxyRequest) (*ProxyResponse, bool) {
+	c.last = pr
+	return &ProxyResponse{
+		ID:     pr.ID,
+		Status: http.StatusOK,
+		Header: http.Header{"Content-Type": []string{"text/plain"}},
+		Body:   []byte("ok"),
+	}, false
+}
+func (c *captureConn) GetRemoteAddr() string { return "127.0.0.1" }
+func (c *captureConn) Close()                {}
+
+func TestProxyHandler_AllowsSSEHeaders(t *testing.T) {
+	reg := NewRegistry()
+	c := &captureConn{}
+	reg.Register("app.example.com", c)
+	handler := ProxyHandler(reg, "tunnel.example.com")
+
+	req := httptest.NewRequest(http.MethodGet, "https://app.example.com/sse", nil)
+	req.Host = "app.example.com"
+	req.Header.Set("Accept", "text/event-stream")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		body, _ := io.ReadAll(rec.Body)
+		t.Fatalf("status=%d body=%s", rec.Code, string(body))
+	}
+	if c.last == nil {
+		t.Fatal("expected request to be forwarded")
+	}
+	if got := c.last.Header.Get("Accept"); got != "text/event-stream" {
+		t.Fatalf("accept header=%q", got)
+	}
+}
+
+func TestMaxRequestBodyBytes_InvalidEnvFallsBack(t *testing.T) {
+	_ = os.Setenv("FWDX_MAX_REQUEST_BODY_BYTES", "not-a-number")
+	defer os.Unsetenv("FWDX_MAX_REQUEST_BODY_BYTES")
+	got := maxRequestBodyBytes()
+	if got <= 0 {
+		t.Fatalf("invalid max body size: %d", got)
+	}
+	if got == 8 {
+		t.Fatalf("unexpected value %d", got)
 	}
 }

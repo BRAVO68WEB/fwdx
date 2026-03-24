@@ -60,8 +60,10 @@ func SaveClientConfig(cfg *ClientConfig) error {
 	return os.WriteFile(filepath.Join(dir, clientConfigFile), data, 0600)
 }
 
-// TunnelURL returns the URL clients use to connect for tunnel registration (host:tunnel_port).
-// If TunnelPort is 0, the port from ServerURL is used (e.g. 443 for single-port behind nginx).
+// TunnelURL returns the URL clients use to connect for the gRPC tunnel.
+// When TunnelPort is 0: if ServerURL has an explicit port, that port is used; otherwise
+// the tunnel port defaults to 4443 (gRPC). This way FWDX_SERVER=https://tunnel.example.com
+// (port 443) automatically uses 4443 for the tunnel, which nginx forwards to the server's grpc port.
 func (c *ClientConfig) TunnelURL() string {
 	u, err := url.Parse(c.ServerURL)
 	if err != nil || u.Host == "" {
@@ -76,11 +78,16 @@ func (c *ClientConfig) TunnelURL() string {
 			}
 		}
 		if port == 0 {
+			// Server URL has no port: default 443 for https, 4443 for http
 			if u.Scheme == "https" {
 				port = 443
 			} else {
 				port = 4443
 			}
+		}
+		// When public URL is 443 (HTTPS), tunnel is always on 4443 (gRPC) behind nginx
+		if port == 443 && u.Scheme == "https" {
+			port = 4443
 		}
 	}
 	u.Host = host + ":" + strconv.Itoa(port)

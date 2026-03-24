@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"sync"
+	"time"
 )
 
 // Config holds server configuration.
@@ -14,8 +15,8 @@ import (
 // Direct: set TLSCertFile/TLSKeyFile; both Web and Grpc use TLS.
 type Config struct {
 	Hostname    string
-	WebPort     int    // HTTP/HTTPS for public and admin (e.g. 8080 behind nginx, 443 direct)
-	GrpcPort    int    // gRPC for tunnel client connections (e.g. 4440 behind nginx, 4443 direct)
+	WebPort     int // HTTP/HTTPS for public and admin (e.g. 8080 behind nginx, 443 direct)
+	GrpcPort    int // gRPC for tunnel client connections (e.g. 4440 behind nginx, 4443 direct)
 	ClientToken string
 	AdminToken  string
 	TLSCertFile string
@@ -28,12 +29,14 @@ type Server struct {
 	cfg      Config
 	registry *Registry
 	domains  *DomainStore
+	stats    *StatsStore
+	started  time.Time
 
 	proxyHandler http.Handler
 
-	webServer  *http.Server
+	webServer    *http.Server
 	grpcListener net.Listener
-	mu         sync.Mutex
+	mu           sync.Mutex
 }
 
 // New creates a new Server.
@@ -50,12 +53,15 @@ func New(cfg Config) (*Server, error) {
 
 	registry := NewRegistry()
 	domains := NewDomainStore(cfg.DataDir)
+	stats := NewStatsStore()
 
 	return &Server{
-		cfg:      cfg,
-		registry: registry,
-		domains:  domains,
-		proxyHandler: ProxyHandler(registry, cfg.Hostname),
+		cfg:          cfg,
+		registry:     registry,
+		domains:      domains,
+		stats:        stats,
+		started:      time.Now(),
+		proxyHandler: ProxyHandlerWithStats(registry, cfg.Hostname, stats),
 	}, nil
 }
 
@@ -64,11 +70,14 @@ func (s *Server) Run() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	mux := http.NewServeMux()
-	mux.Handle("/admin/", AdminRouter(s.cfg.AdminToken, s.cfg.Hostname, s.registry, s.domains))
-	mux.Handle("/", s.proxyHandler)
-
 	useTLS := s.cfg.TLSCertFile != "" && s.cfg.TLSKeyFile != ""
+
+	mux := http.NewServeMux()
+	adminUI := AdminUIRouter(s.cfg, s.registry, s.domains, s.stats, s.started, useTLS)
+	mux.Handle("/admin/ui/", adminUI)
+	mux.Handle("/admin/ui", adminUI)
+	mux.Handle("/admin/", AdminRouter(s.cfg.AdminToken, s.cfg.Hostname, s.registry, s.domains, s.stats))
+	mux.Handle("/", s.proxyHandler)
 
 	s.webServer = &http.Server{
 		Addr:    fmt.Sprintf(":%d", s.cfg.WebPort),

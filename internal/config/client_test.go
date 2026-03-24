@@ -22,9 +22,9 @@ func TestClientConfig_TunnelURL(t *testing.T) {
 			want: "https://tunnel.example.com:4443",
 		},
 		{
-			name: "zero port uses URL port (https default 443, single-port behind nginx)",
+			name: "zero port with https URL defaults to 4443 for gRPC tunnel (nginx: 443=web, 4443=grpc)",
 			cfg:  ClientConfig{ServerURL: "https://tunnel.example.com", TunnelPort: 0},
-			want: "https://tunnel.example.com:443",
+			want: "https://tunnel.example.com:4443",
 		},
 		{
 			name: "zero port with explicit 4443 in URL",

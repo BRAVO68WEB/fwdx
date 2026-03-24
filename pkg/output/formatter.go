@@ -8,6 +8,7 @@ import (
 	"github.com/BRAVO68WEB/fwdx/internal/tunnel"
 	"github.com/fatih/color"
 	"github.com/olekukonko/tablewriter"
+	"gopkg.in/yaml.v3"
 )
 
 func PrintSuccess(msg string) {
@@ -30,7 +31,7 @@ func PrintTunnelList(tunnels []*tunnel.Tunnel, format string) {
 		return
 	}
 	if format == "yaml" {
-		data, _ := json.Marshal(tunnels)
+		data, _ := yaml.Marshal(tunnels)
 		fmt.Println(string(data))
 		return
 	}

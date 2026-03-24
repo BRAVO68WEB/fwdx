@@ -23,6 +23,18 @@ func (r *Registry) Register(hostname string, conn TunnelConnection) {
 	r.tunnels[hostname] = conn
 }
 
+// RegisterIfAbsent registers a hostname only if no active tunnel exists.
+// Returns true when registration succeeded, false when hostname is already active.
+func (r *Registry) RegisterIfAbsent(hostname string, conn TunnelConnection) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if old := r.tunnels[hostname]; old != nil {
+		return false
+	}
+	r.tunnels[hostname] = conn
+	return true
+}
+
 func (r *Registry) Unregister(hostname string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -30,6 +42,18 @@ func (r *Registry) Unregister(hostname string) {
 		conn.Close()
 		delete(r.tunnels, hostname)
 	}
+}
+
+// Disconnect forcibly closes and unregisters an active tunnel by hostname.
+func (r *Registry) Disconnect(hostname string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if conn := r.tunnels[hostname]; conn != nil {
+		conn.Close()
+		delete(r.tunnels, hostname)
+		return true
+	}
+	return false
 }
 
 func (r *Registry) Get(hostname string) TunnelConnection {
