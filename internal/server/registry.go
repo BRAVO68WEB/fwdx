@@ -44,6 +44,18 @@ func (r *Registry) Unregister(hostname string) {
 	}
 }
 
+// Disconnect forcibly closes and unregisters an active tunnel by hostname.
+func (r *Registry) Disconnect(hostname string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if conn := r.tunnels[hostname]; conn != nil {
+		conn.Close()
+		delete(r.tunnels, hostname)
+		return true
+	}
+	return false
+}
+
 func (r *Registry) Get(hostname string) TunnelConnection {
 	r.mu.RLock()
 	defer r.mu.RUnlock()

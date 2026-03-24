@@ -7,7 +7,11 @@ import (
 )
 
 // AdminRouter returns an http.Handler that serves /admin/* with admin token auth.
-func AdminRouter(adminToken, hostname string, registry *Registry, domains *DomainStore) http.Handler {
+func AdminRouter(adminToken, hostname string, registry *Registry, domains *DomainStore, stats ...*StatsStore) http.Handler {
+	var st *StatsStore
+	if len(stats) > 0 {
+		st = stats[0]
+	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !checkAdminToken(r, adminToken) {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
@@ -22,6 +26,15 @@ func AdminRouter(adminToken, hostname string, registry *Registry, domains *Domai
 			list := registry.List()
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(list)
+			return
+		case r.Method == http.MethodGet && r.URL.Path == "/admin/stats/tunnels":
+			if st == nil {
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode([]TunnelStats{})
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(st.Snapshot(registry.List()))
 			return
 		case r.Method == http.MethodGet && r.URL.Path == "/admin/domains":
 			list := domains.List()
