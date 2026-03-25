@@ -1,0 +1,38 @@
+---
+title: CLI Device Flow
+description: Use OIDC device flow for CLI access.
+---
+
+# CLI Device Flow
+
+Log in from the CLI:
+
+```bash
+export FWDX_SERVER=https://tunnel.example.com
+fwdx login
+```
+
+The CLI prints:
+
+- verification URL
+- user code
+- direct verification URL when the provider exposes one
+
+After approval:
+
+```bash
+fwdx whoami
+```
+
+Management commands reuse the stored session:
+
+```bash
+fwdx manage tunnels --server https://tunnel.example.com
+fwdx domains add my.domain --server https://tunnel.example.com
+```
+
+The stored session lives at:
+
+```text
+~/.fwdx/auth.json
+```

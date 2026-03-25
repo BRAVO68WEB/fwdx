@@ -1,0 +1,19 @@
+---
+title: Traffic Flow
+description: How public requests reach the client-side local app.
+---
+
+# Traffic Flow
+
+Current flow:
+
+1. Client opens a gRPC stream to the server.
+2. Client registers a hostname.
+3. Browser sends a request to `https://<hostname>`.
+4. Server looks up the active tunnel.
+5. Server sends a proxied request over the stream.
+6. Client forwards that request to the local app.
+7. Client returns the response over the stream.
+8. Server returns that response to the browser.
+
+This model works behind NAT because the client initiates the outbound connection.

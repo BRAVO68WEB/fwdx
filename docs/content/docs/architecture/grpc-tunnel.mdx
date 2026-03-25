@@ -1,0 +1,20 @@
+---
+title: gRPC Tunnel Design
+description: Current gRPC stream design and why it replaced polling.
+---
+
+# gRPC Tunnel Design
+
+The current transport uses one long-lived gRPC stream per active tunnel.
+
+Benefits:
+
+- outbound-only client connectivity
+- low-latency server-to-client request dispatch
+- room for heartbeats and future stream extensions
+- simpler operator deployment than request polling
+
+Current limitations:
+
+- WebSocket support is still pending
+- tunnel metadata is not yet fully server-owned

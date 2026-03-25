@@ -1,0 +1,54 @@
+---
+title: CLI Usage
+description: Core commands for login, management, tunnel runtime, and diagnostics.
+---
+
+# CLI Usage
+
+The current CLI has four areas:
+
+- server startup
+- OIDC login
+- admin management
+- tunnel lifecycle
+
+## Server
+
+```bash
+fwdx serve \
+  --hostname tunnel.example.com \
+  --oidc-issuer https://issuer.example.com \
+  --oidc-client-id fwdx-web \
+  --oidc-client-secret ... \
+  --oidc-redirect-url https://tunnel.example.com/auth/oidc/callback
+```
+
+## Human auth
+
+```bash
+fwdx login
+fwdx whoami
+fwdx logout
+```
+
+## Management
+
+```bash
+fwdx manage tunnels --server https://tunnel.example.com
+fwdx manage domains list --server https://tunnel.example.com
+fwdx domains add my.domain --server https://tunnel.example.com
+```
+
+## Tunnel runtime
+
+```bash
+export FWDX_SERVER=https://tunnel.example.com
+
+fwdx tunnel create -l localhost:3000 -s app --name app
+fwdx tunnel start app
+fwdx tunnel stop app
+fwdx tunnel list
+fwdx logs app --follow
+```
+
+The CLI provisions an agent credential automatically on first tunnel create/start and stores it locally.

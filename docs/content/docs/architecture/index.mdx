@@ -1,0 +1,19 @@
+---
+title: Architecture / Spec
+description: Current tunnel flow and the rewrite direction toward a fuller control plane.
+---
+
+# Architecture / Spec
+
+The current implementation uses:
+
+- public HTTP ingress on the server
+- a gRPC tunnel stream from client to server
+- request forwarding over that stream
+- server-side admin APIs and UI
+
+## Architecture Pages
+
+- [Traffic Flow](/docs/architecture/traffic-flow)
+- [gRPC Tunnel Design](/docs/architecture/grpc-tunnel)
+- [Rewrite Direction](/docs/architecture/rewrite-direction)

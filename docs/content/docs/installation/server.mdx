@@ -1,0 +1,32 @@
+---
+title: Server Install
+description: Build and install the fwdx server binary.
+---
+
+# Server Install
+
+Build from source:
+
+```bash
+git clone https://github.com/BRAVO68WEB/fwdx.git
+cd fwdx
+go build -o fwdx .
+sudo mv fwdx /usr/local/bin/
+```
+
+Run behind nginx:
+
+```bash
+fwdx serve \
+  --hostname tunnel.example.com \
+  --oidc-issuer https://issuer.example.com \
+  --oidc-client-id fwdx-web \
+  --oidc-client-secret YOUR_OIDC_SECRET \
+  --oidc-redirect-url https://tunnel.example.com/auth/oidc/callback \
+  --oidc-admin-emails admin@example.com \
+  --web-port 4040 \
+  --grpc-port 4440 \
+  --data-dir /var/lib/fwdx
+```
+
+The web port serves proxy traffic, admin UI, OIDC callback routes, and admin APIs. The gRPC port serves tunnel clients.

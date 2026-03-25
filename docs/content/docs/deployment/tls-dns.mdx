@@ -1,0 +1,22 @@
+---
+title: TLS and DNS
+description: DNS records and certificates required for public tunnel routing.
+---
+
+# TLS and DNS
+
+## DNS
+
+You need:
+
+- `tunnel.example.com` -> server public IP
+- `*.tunnel.example.com` -> server public IP
+
+## TLS
+
+The certificate must cover:
+
+- `tunnel.example.com`
+- `*.tunnel.example.com`
+
+If nginx terminates TLS, fwdx itself can stay on plain local ports.
