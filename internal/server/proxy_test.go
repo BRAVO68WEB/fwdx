@@ -203,3 +203,150 @@ func TestMaxRequestBodyBytes_InvalidEnvFallsBack(t *testing.T) {
 		t.Fatalf("unexpected value %d", got)
 	}
 }
+
+func TestProxyHandler_BasicAuthRule(t *testing.T) {
+	store, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	tun, err := store.CreateTunnel(context.Background(), 1, "app", "app.example.com", "http://localhost:3000", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertTunnelAccessRule(context.Background(), tun.ID, AccessRuleInput{
+		AuthMode:          "basic_auth",
+		BasicAuthUsername: "demo",
+		BasicAuthPassword: "secret",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	reg := NewRegistry()
+	reg.Register("app.example.com", &captureConn{})
+	handler := ProxyHandlerWithConfig(reg, Config{Hostname: "tunnel.example.com"}, nil, store)
+
+	req := httptest.NewRequest(http.MethodGet, "https://app.example.com/", nil)
+	req.Host = "app.example.com"
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status=%d want 401", rec.Code)
+	}
+
+	req2 := httptest.NewRequest(http.MethodGet, "https://app.example.com/", nil)
+	req2.Host = "app.example.com"
+	req2.SetBasicAuth("demo", "secret")
+	rec2 := httptest.NewRecorder()
+	handler.ServeHTTP(rec2, req2)
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("status=%d want 200", rec2.Code)
+	}
+	logs, err := store.ListRequestLogsByTunnel(context.Background(), tun.ID, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(logs) < 2 {
+		t.Fatalf("expected request logs, got %d", len(logs))
+	}
+}
+
+func TestProxyHandler_SharedSecretRule(t *testing.T) {
+	store, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	tun, err := store.CreateTunnel(context.Background(), 1, "app", "app.example.com", "http://localhost:3000", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertTunnelAccessRule(context.Background(), tun.ID, AccessRuleInput{
+		AuthMode:               "shared_secret_header",
+		SharedSecretHeaderName: "X-Test-Secret",
+		SharedSecretValue:      "secret",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	reg := NewRegistry()
+	reg.Register("app.example.com", &captureConn{})
+	handler := ProxyHandlerWithConfig(reg, Config{Hostname: "tunnel.example.com"}, nil, store)
+
+	req := httptest.NewRequest(http.MethodGet, "https://app.example.com/", nil)
+	req.Host = "app.example.com"
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status=%d want 401", rec.Code)
+	}
+
+	req2 := httptest.NewRequest(http.MethodGet, "https://app.example.com/", nil)
+	req2.Host = "app.example.com"
+	req2.Header.Set("X-Test-Secret", "secret")
+	rec2 := httptest.NewRecorder()
+	handler.ServeHTTP(rec2, req2)
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("status=%d want 200", rec2.Code)
+	}
+}
+
+func TestProxyHandler_IPAllowlist_TrustedProxy(t *testing.T) {
+	store, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	tun, err := store.CreateTunnel(context.Background(), 1, "app", "app.example.com", "http://localhost:3000", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertTunnelAccessRule(context.Background(), tun.ID, AccessRuleInput{
+		AuthMode:   "public",
+		AllowedIPs: []string{"203.0.113.0/24"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	reg := NewRegistry()
+	reg.Register("app.example.com", &captureConn{})
+	handler := ProxyHandlerWithConfig(reg, Config{Hostname: "tunnel.example.com", TrustedProxyCIDRs: []string{"10.0.0.0/8"}}, nil, store)
+
+	req := httptest.NewRequest(http.MethodGet, "https://app.example.com/", nil)
+	req.Host = "app.example.com"
+	req.RemoteAddr = "10.1.1.1:12345"
+	req.Header.Set("X-Forwarded-For", "203.0.113.10")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d want 200", rec.Code)
+	}
+}
+
+func TestProxyHandler_IPAllowlist_UntrustedProxy(t *testing.T) {
+	store, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	tun, err := store.CreateTunnel(context.Background(), 1, "app", "app.example.com", "http://localhost:3000", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertTunnelAccessRule(context.Background(), tun.ID, AccessRuleInput{
+		AuthMode:   "public",
+		AllowedIPs: []string{"203.0.113.0/24"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	reg := NewRegistry()
+	reg.Register("app.example.com", &captureConn{})
+	handler := ProxyHandlerWithConfig(reg, Config{Hostname: "tunnel.example.com", TrustedProxyCIDRs: []string{"10.0.0.0/8"}}, nil, store)
+
+	req := httptest.NewRequest(http.MethodGet, "https://app.example.com/", nil)
+	req.Host = "app.example.com"
+	req.RemoteAddr = "198.51.100.10:12345"
+	req.Header.Set("X-Forwarded-For", "203.0.113.10")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status=%d want 403", rec.Code)
+	}
+}

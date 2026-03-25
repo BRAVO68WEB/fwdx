@@ -30,7 +30,7 @@ message ServerMessage {
 }
 
 message Register {
-  string hostname = 1;
+  string tunnel_name = 1;
   string local_url = 2;
 }
 

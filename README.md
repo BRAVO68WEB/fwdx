@@ -1,13 +1,13 @@
 # fwdx
 
-Self-hosted tunneling CLI and server for exposing local HTTP services by hostname over gRPC (like ngrok or cloudflared, but your own server).
+Self-hosted HTTP tunneling over gRPC with your own domain, OIDC-authenticated admin access, and a local tunnel client.
 
-## Installation
+## Build
 
 ### Prerequisites
-- Go 1.21+
+- Go 1.25+
 
-### From Source
+### From source
 
 ```bash
 git clone https://github.com/BRAVO68WEB/fwdx.git
@@ -15,94 +15,144 @@ cd fwdx
 go build -o fwdx .
 ```
 
-### Docker
+## Current auth model
 
-```bash
-docker build -t fwdx .
-```
+- Human auth is OIDC only.
+- Browser admin UI uses OIDC login.
+- CLI human access uses `fwdx login` with device flow.
+- Tunnel runtime uses per-agent credentials issued by the server control plane.
 
-## Self-hosting (detailed guide)
-
-For a **step-by-step guide** to run the server on your own VPS (DNS, TLS with Let's Encrypt, systemd or Docker, firewall, first tunnel), see **[docs/SELFHOSTING.md](docs/SELFHOSTING.md)**.
-
-## Quick Start
+## Quick start
 
 ### 1. Run the server
 
-On a machine with a public IP and a hostname (e.g. `tunnel.myweb.site`):
-
 ```bash
-# TLS cert and key required (e.g. from Let's Encrypt or self-signed for dev)
 export FWDX_HOSTNAME=tunnel.myweb.site
-export FWDX_CLIENT_TOKEN=your-client-token
-export FWDX_ADMIN_TOKEN=your-admin-token
-fwdx serve --hostname $FWDX_HOSTNAME --client-token $FWDX_CLIENT_TOKEN --admin-token $FWDX_ADMIN_TOKEN --tls-cert /path/to/cert.pem --tls-key /path/to/key.pem
+export FWDX_OIDC_ISSUER=https://issuer.example.com
+export FWDX_OIDC_CLIENT_ID=fwdx-web
+export FWDX_OIDC_CLIENT_SECRET=your-client-secret
+export FWDX_OIDC_REDIRECT_URL=https://tunnel.myweb.site/auth/oidc/callback
+export FWDX_OIDC_ADMIN_EMAILS=you@example.com
+
+fwdx serve \
+  --hostname "$FWDX_HOSTNAME" \
+  --oidc-issuer "$FWDX_OIDC_ISSUER" \
+  --oidc-client-id "$FWDX_OIDC_CLIENT_ID" \
+  --oidc-client-secret "$FWDX_OIDC_CLIENT_SECRET" \
+  --oidc-redirect-url "$FWDX_OIDC_REDIRECT_URL" \
+  --oidc-admin-emails "$FWDX_OIDC_ADMIN_EMAILS" \
+  --web-port 4040 \
+  --grpc-port 4440 \
+  --data-dir /var/lib/fwdx
 ```
 
-First-time DNS: create an **A** record: `tunnel.myweb.site` -> your server IP.
-Also create wildcard DNS for subdomains: `*.tunnel.myweb.site` -> your server IP.
+Create DNS:
+- `tunnel.myweb.site -> server IP`
+- `*.tunnel.myweb.site -> server IP`
 
-### 2. Add allowed domains (optional)
-
-To use a custom domain (e.g. `app.my.domain`) instead of a subdomain under the server hostname:
-
-```bash
-fwdx domains add my.domain --server https://tunnel.myweb.site --admin-token $FWDX_ADMIN_TOKEN
-```
-
-Then create a **CNAME** record: `*.my.domain` -> `tunnel.myweb.site`.
-
-### 3. Create and start a tunnel (client)
-
-On your laptop or dev machine:
+### 2. Log in for human admin actions
 
 ```bash
 export FWDX_SERVER=https://tunnel.myweb.site
-export FWDX_TOKEN=your-client-token
+fwdx login
+fwdx whoami
+```
 
-# Subdomain under server hostname (e.g. myapp.tunnel.myweb.site)
+The admin UI is served at `/admin/ui` and redirects through OIDC.
+Tunnel detail pages under `/admin/ui/tunnels/:name` expose assignment, recent events/logs, and ingress access controls.
+
+### 3. Add domains if needed
+
+```bash
+fwdx domains add my.domain --server https://tunnel.myweb.site
+```
+
+### 4. Start a tunnel client
+
+```bash
+export FWDX_SERVER=https://tunnel.myweb.site
+
 fwdx tunnel create -l localhost:8080 -s myapp --name myapp
-fwdx tunnel start myapp
-
-# Or custom domain (if added via domains add)
-fwdx tunnel create -l localhost:8080 -u app.my.domain --name myapp
 fwdx tunnel start myapp
 ```
 
-Access at `https://myapp.tunnel.myweb.site` or `https://app.my.domain`.
+## CLI
 
-## Commands
+### Human auth
+
+```bash
+fwdx login
+fwdx whoami
+fwdx logout
+```
+
+### Admin / management
+
+```bash
+fwdx manage tunnels --server https://tunnel.myweb.site
+fwdx manage domains list --server https://tunnel.myweb.site
+fwdx domains add my.domain --server https://tunnel.myweb.site
+```
+
+These commands use the OIDC session created by `fwdx login`.
+
+### Tunnel runtime
+
+```bash
+fwdx tunnel create -l localhost:3000 -s app --name app
+fwdx tunnel start app --detach
+fwdx logs app --follow
+fwdx tunnel stop app
+```
+
+### Ingress access controls
+
+Each tunnel supports:
+- `public`
+- `basic_auth`
+- `shared_secret_header`
+- optional `ip_allowlist`
+
+Access rules are managed from the admin UI tunnel detail page.
+
+## Config summary
 
 ### Server
-- `fwdx serve` - Start the tunneling server (see flags: --hostname, --client-token, --admin-token, --tls-cert, --tls-key)
-
-### Management (remote)
-- `fwdx manage tunnels` - List active tunnels (--server, --admin-token)
-- `fwdx manage domains list` - List allowed domains
-- `fwdx domains add <domain>` - Add domain to allowed list and print DNS instructions
+- `FWDX_HOSTNAME`
+- `FWDX_OIDC_ISSUER`
+- `FWDX_OIDC_CLIENT_ID`
+- `FWDX_OIDC_CLIENT_SECRET`
+- `FWDX_OIDC_REDIRECT_URL`
+- `FWDX_OIDC_SCOPES`
+- `FWDX_OIDC_ADMIN_EMAILS`
+- `FWDX_OIDC_ADMIN_SUBJECTS`
+- `FWDX_OIDC_ADMIN_GROUPS`
+- `FWDX_OIDC_SESSION_SECRET`
+- `FWDX_OIDC_DEVICE_CLIENT_ID`
+- `FWDX_TRUSTED_PROXY_CIDRS`
 
 ### Client
-- `fwdx tunnel create` - Create a tunnel (--local, --subdomain or --url, --name)
-- `fwdx tunnel start <name>` - Start tunnel in foreground (use `--detach` for background)
-- `fwdx tunnel stop <name>` - Stop a tunnel
-- `fwdx logs <name>` - Show detached tunnel logs (`--follow`)
-- `fwdx tunnel list` - List tunnels
-- `fwdx tunnel delete <name>` - Delete a tunnel
-- `fwdx config` - Show client config (FWDX_SERVER, FWDX_TOKEN)
-- `fwdx health` - Check client config and server reachability
+- `FWDX_SERVER`
+- `FWDX_AGENT_NAME`
+- `FWDX_AGENT_TOKEN`
+- `FWDX_TUNNEL_PORT`
+- `FWDX_MAX_PROXY_BODY_BYTES`
+- `FWDX_MAX_RESPONSE_BODY_BYTES`
 
-## Configuration
+## Protocol scope
 
-**Client:** Set `FWDX_SERVER` and `FWDX_TOKEN` (or create `~/.fwdx/client.json` with `server_url` and `token`). Optional: `server_hostname`, `tunnel_port` (default 4443), `FWDX_MAX_PROXY_BODY_BYTES`, `FWDX_MAX_RESPONSE_BODY_BYTES`.
+- HTTP forwarding: supported
+- SSE: supported
+- WebSocket: not implemented yet (`501 Not Implemented`)
 
-**Server:** Set `FWDX_HOSTNAME`, `FWDX_CLIENT_TOKEN`, `FWDX_ADMIN_TOKEN` or pass via flags. TLS cert and key are required in direct mode. Admin token is for admin APIs only; tunnel clients authenticate with client token.
+## Docs
 
-Current protocol scope: HTTP forwarding and SSE are supported; WebSocket upgrade is currently returned as `501 Not Implemented`.
-
-## CI & Releases
-
-- **CI** (`.github/workflows/ci.yml`): On push to `main` and on pull requests — build, unit/in-process tests (with `FWDX_SKIP_DOCKER_E2E=1`), and a separate job for Docker e2e tests.
-- **Release** (`.github/workflows/release.yml`): On tag push (e.g. `v1.0.0`) — build binaries for **linux** and **darwin** (amd64 + arm64), upload them as workflow artifacts and to the GitHub Release; build and push a multi-arch Docker image (linux/amd64, linux/arm64) to `ghcr.io/<owner>/fwdx`.
+The Fumadocs site under `docs/` contains:
+- Installation
+- CLI Usage
+- Deployment
+- Architecture
+- Authentication
 
 ## License
 

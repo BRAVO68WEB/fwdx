@@ -6,15 +6,28 @@ import (
 	"strings"
 )
 
-// AdminRouter returns an http.Handler that serves /admin/* with admin token auth.
-func AdminRouter(adminToken, hostname string, registry *Registry, domains *DomainStore, stats ...*StatsStore) http.Handler {
+// AdminRouter returns an http.Handler that serves /admin/* with OIDC session auth.
+func AdminRouter(hostname string, registry *Registry, domains *DomainStore, auth *AuthManager, stats ...any) http.Handler {
 	var st *StatsStore
+	var store *Store
 	if len(stats) > 0 {
-		st = stats[0]
+		if v, ok := stats[0].(*StatsStore); ok {
+			st = v
+		}
+	}
+	if len(stats) > 1 {
+		if v, ok := stats[1].(*Store); ok {
+			store = v
+		}
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !checkAdminToken(r, adminToken) {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
+		if auth == nil {
+			http.Error(w, "auth not configured", http.StatusServiceUnavailable)
+			return
+		}
+		ok, status := auth.authorizeAdmin(r)
+		if !ok {
+			http.Error(w, http.StatusText(status), status)
 			return
 		}
 		switch {
@@ -35,6 +48,38 @@ func AdminRouter(adminToken, hostname string, registry *Registry, domains *Domai
 			}
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(st.Snapshot(registry.List()))
+			return
+		case r.Method == http.MethodGet && r.URL.Path == "/admin/control/tunnels":
+			if store == nil {
+				http.Error(w, "store unavailable", http.StatusServiceUnavailable)
+				return
+			}
+			list, err := store.ListTunnels(r.Context())
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(list)
+			return
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/admin/logs/tunnels/"):
+			if store == nil {
+				http.Error(w, "store unavailable", http.StatusServiceUnavailable)
+				return
+			}
+			hostname := strings.TrimPrefix(r.URL.Path, "/admin/logs/tunnels/")
+			hostname = strings.TrimSpace(strings.ToLower(hostname))
+			if hostname == "" {
+				http.Error(w, "hostname required", http.StatusBadRequest)
+				return
+			}
+			logs, err := store.ListRequestLogs(r.Context(), hostname, 100)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(logs)
 			return
 		case r.Method == http.MethodGet && r.URL.Path == "/admin/domains":
 			list := domains.List()
@@ -78,16 +123,4 @@ func AdminRouter(adminToken, hostname string, registry *Registry, domains *Domai
 			http.NotFound(w, r)
 		}
 	})
-}
-
-func checkAdminToken(r *http.Request, adminToken string) bool {
-	if adminToken == "" {
-		return false
-	}
-	const prefix = "Bearer "
-	h := r.Header.Get("Authorization")
-	if len(h) < len(prefix) || !strings.EqualFold(h[:len(prefix)], prefix) {
-		return false
-	}
-	return strings.TrimSpace(h[len(prefix):]) == adminToken
 }

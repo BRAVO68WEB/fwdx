@@ -1,0 +1,11 @@
+.git
+.gitignore
+docs
+specs
+node_modules
+**/node_modules
+.DS_Store
+*.db
+*.log
+.fwdx-server
+.tmp

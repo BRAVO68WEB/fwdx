@@ -65,14 +65,17 @@ func TestLoadClientConfig_ReturnsDefaultTunnelPort(t *testing.T) {
 
 func TestLoadClientConfig_EnvOverride(t *testing.T) {
 	origServer := os.Getenv("FWDX_SERVER")
-	origToken := os.Getenv("FWDX_TOKEN")
+	origAgentName := os.Getenv("FWDX_AGENT_NAME")
+	origAgentToken := os.Getenv("FWDX_AGENT_TOKEN")
 	defer func() {
 		os.Setenv("FWDX_SERVER", origServer)
-		os.Setenv("FWDX_TOKEN", origToken)
+		os.Setenv("FWDX_AGENT_NAME", origAgentName)
+		os.Setenv("FWDX_AGENT_TOKEN", origAgentToken)
 	}()
 
 	os.Setenv("FWDX_SERVER", "https://env-test.example.com")
-	os.Setenv("FWDX_TOKEN", "env-secret")
+	os.Setenv("FWDX_AGENT_NAME", "env-agent")
+	os.Setenv("FWDX_AGENT_TOKEN", "env-secret")
 	cfg, err := LoadClientConfig()
 	if err != nil {
 		t.Fatal(err)
@@ -94,9 +97,10 @@ func TestSaveClientConfig_LoadClientConfig_Roundtrip(t *testing.T) {
 
 	cfg := &ClientConfig{
 		ServerURL:      "https://roundtrip.example.com",
-		Token:          "roundtrip-token",
 		ServerHostname: "roundtrip.example.com",
 		TunnelPort:     9999,
+		AgentName:      "roundtrip-agent",
+		AgentToken:     "roundtrip-token",
 	}
 	if err := SaveClientConfig(cfg); err != nil {
 		t.Fatal(err)
@@ -108,8 +112,11 @@ func TestSaveClientConfig_LoadClientConfig_Roundtrip(t *testing.T) {
 	if loaded.ServerURL != cfg.ServerURL {
 		t.Errorf("ServerURL = %q, want %q", loaded.ServerURL, cfg.ServerURL)
 	}
-	if loaded.Token != cfg.Token {
-		t.Errorf("Token = %q, want %q", loaded.Token, cfg.Token)
+	if loaded.AgentName != cfg.AgentName {
+		t.Errorf("AgentName = %q, want %q", loaded.AgentName, cfg.AgentName)
+	}
+	if loaded.AgentToken != cfg.AgentToken {
+		t.Errorf("AgentToken = %q, want %q", loaded.AgentToken, cfg.AgentToken)
 	}
 	if loaded.ServerHostname != cfg.ServerHostname {
 		t.Errorf("ServerHostname = %q, want %q", loaded.ServerHostname, cfg.ServerHostname)

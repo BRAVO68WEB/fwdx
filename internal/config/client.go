@@ -9,12 +9,13 @@ import (
 	"strings"
 )
 
-// ClientConfig holds the fwdx client configuration (server URL, token).
+// ClientConfig holds local client runtime config.
 type ClientConfig struct {
-	ServerURL       string `json:"server_url"`
-	Token           string `json:"token"`
-	ServerHostname  string `json:"server_hostname,omitempty"` // optional; derived from ServerURL if empty
-	TunnelPort      int    `json:"tunnel_port,omitempty"`      // optional; default 4443
+	ServerURL      string `json:"server_url"`
+	ServerHostname string `json:"server_hostname,omitempty"` // optional; derived from ServerURL if empty
+	TunnelPort     int    `json:"tunnel_port,omitempty"`     // optional; default 4443
+	AgentName      string `json:"agent_name,omitempty"`
+	AgentToken     string `json:"agent_token,omitempty"`
 }
 
 const clientConfigFile = "client.json"
@@ -30,9 +31,6 @@ func LoadClientConfig() (*ClientConfig, error) {
 	if cfg.ServerURL == "" {
 		cfg.ServerURL = os.Getenv("FWDX_SERVER")
 	}
-	if cfg.Token == "" {
-		cfg.Token = os.Getenv("FWDX_TOKEN")
-	}
 	if v := os.Getenv("FWDX_TUNNEL_PORT"); v != "" {
 		if p, err := strconv.Atoi(v); err == nil {
 			cfg.TunnelPort = p // 0 = use port from ServerURL (e.g. 443 behind nginx)
@@ -43,6 +41,12 @@ func LoadClientConfig() (*ClientConfig, error) {
 		if err == nil {
 			cfg.ServerHostname = u.Hostname()
 		}
+	}
+	if cfg.AgentName == "" {
+		cfg.AgentName = os.Getenv("FWDX_AGENT_NAME")
+	}
+	if cfg.AgentToken == "" {
+		cfg.AgentToken = os.Getenv("FWDX_AGENT_TOKEN")
 	}
 	return cfg, nil
 }

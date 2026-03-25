@@ -1,0 +1,10 @@
+FROM golang:1.25-alpine AS builder
+WORKDIR /app
+COPY tests/docker/mockoidc/go.mod ./go.mod
+COPY tests/docker/mockoidc/main.go ./main.go
+RUN go build -o mockoidc .
+
+FROM alpine:3.20
+RUN apk add --no-cache ca-certificates
+COPY --from=builder /app/mockoidc /usr/local/bin/mockoidc
+ENTRYPOINT ["mockoidc"]

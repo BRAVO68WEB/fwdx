@@ -35,8 +35,8 @@ func maxProxyBodyBytes() int {
 }
 
 // Connect runs the tunnel client over gRPC: register, then receive ProxyRequests and send ProxyResponses.
-// tunnelURL is the gRPC endpoint (e.g. https://tunnel.example.com:4443). Token is sent in gRPC metadata.
-func Connect(ctx context.Context, tunnelURL, token, hostname, localURL string, debug bool) error {
+// tunnelURL is the gRPC endpoint (e.g. https://tunnel.example.com:4443). Agent credential is sent in gRPC metadata.
+func Connect(ctx context.Context, tunnelURL, agentToken, tunnelName, localURL string, debug bool) error {
 	tunnelURL = strings.TrimSuffix(tunnelURL, "/")
 	u, err := url.Parse(tunnelURL)
 	if err != nil {
@@ -74,9 +74,10 @@ func Connect(ctx context.Context, tunnelURL, token, hostname, localURL string, d
 		return fmt.Errorf("grpc dial: %w", err)
 	}
 	defer conn.Close()
+	log.Printf("[fwdx] tunnel dialing target=%s tunnel=%s local=%s", target, tunnelName, localURL)
 
 	client := tunnelv1.NewTunnelServiceClient(conn)
-	md := metadata.Pairs("authorization", "Bearer "+token)
+	md := metadata.Pairs("authorization", "Bearer "+agentToken)
 	streamCtx := metadata.NewOutgoingContext(ctx, md)
 	stream, err := client.Connect(streamCtx)
 	if err != nil {
@@ -87,8 +88,8 @@ func Connect(ctx context.Context, tunnelURL, token, hostname, localURL string, d
 	if err := stream.Send(&tunnelv1.ClientMessage{
 		Message: &tunnelv1.ClientMessage_Register{
 			Register: &tunnelv1.Register{
-				Hostname: hostname,
-				LocalUrl: localURL,
+				TunnelName: tunnelName,
+				LocalUrl:   localURL,
 			},
 		},
 	}); err != nil {
@@ -108,8 +109,9 @@ func Connect(ctx context.Context, tunnelURL, token, hostname, localURL string, d
 		return fmt.Errorf("register: %s", errStr)
 	}
 
+	log.Printf("[fwdx] tunnel connected tunnel=%s local=%s", tunnelName, localURL)
 	if debug {
-		fmt.Printf("tunnel registered %s -> %s\n", hostname, localURL)
+		fmt.Printf("tunnel registered %s -> %s\n", tunnelName, localURL)
 	}
 
 	// Loop: receive ProxyRequest, proxy to local, send ProxyResponse
@@ -117,8 +119,10 @@ func Connect(ctx context.Context, tunnelURL, token, hostname, localURL string, d
 		msg, err := stream.Recv()
 		if err != nil {
 			if errors.Is(err, io.EOF) {
+				log.Printf("[fwdx] tunnel closed tunnel=%s reason=eof", tunnelName)
 				return nil
 			}
+			log.Printf("[fwdx] tunnel closed tunnel=%s err=%v", tunnelName, err)
 			return err
 		}
 		preq := msg.GetProxyRequest()

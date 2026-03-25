@@ -189,7 +189,7 @@ func (*ServerMessage_ProxyRequest) isServerMessage_Message() {}
 
 type Register struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	Hostname      string                 `protobuf:"bytes,1,opt,name=hostname,proto3" json:"hostname,omitempty"`
+	TunnelName    string                 `protobuf:"bytes,1,opt,name=tunnel_name,json=tunnelName,proto3" json:"tunnel_name,omitempty"`
 	LocalUrl      string                 `protobuf:"bytes,2,opt,name=local_url,json=localUrl,proto3" json:"local_url,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -225,9 +225,9 @@ func (*Register) Descriptor() ([]byte, []int) {
 	return file_api_tunnel_v1_tunnel_proto_rawDescGZIP(), []int{2}
 }
 
-func (x *Register) GetHostname() string {
+func (x *Register) GetTunnelName() string {
 	if x != nil {
-		return x.Hostname
+		return x.TunnelName
 	}
 	return ""
 }
@@ -455,9 +455,10 @@ const file_api_tunnel_v1_tunnel_proto_rawDesc = "" +
 	"\rServerMessage\x12;\n" +
 	"\fregister_ack\x18\x01 \x01(\v2\x16.tunnel.v1.RegisterAckH\x00R\vregisterAck\x12>\n" +
 	"\rproxy_request\x18\x02 \x01(\v2\x17.tunnel.v1.ProxyRequestH\x00R\fproxyRequestB\t\n" +
-	"\amessage\"C\n" +
-	"\bRegister\x12\x1a\n" +
-	"\bhostname\x18\x01 \x01(\tR\bhostname\x12\x1b\n" +
+	"\amessage\"H\n" +
+	"\bRegister\x12\x1f\n" +
+	"\vtunnel_name\x18\x01 \x01(\tR\n" +
+	"tunnelName\x12\x1b\n" +
 	"\tlocal_url\x18\x02 \x01(\tR\blocalUrl\"3\n" +
 	"\vRegisterAck\x12\x0e\n" +
 	"\x02ok\x18\x01 \x01(\bR\x02ok\x12\x14\n" +

@@ -56,7 +56,9 @@ func PrintTunnelDetails(t *tunnel.Tunnel) {
 	fmt.Printf("Name:      %s\n", t.Name)
 	fmt.Printf("Hostname:  https://%s\n", t.Hostname)
 	fmt.Printf("Local:     http://%s\n", t.Local)
-	fmt.Printf("Private:   %v\n", t.Private)
+	if t.AssignedAgent != "" {
+		fmt.Printf("Agent:     %s\n", t.AssignedAgent)
+	}
 	fmt.Printf("Running:   %v\n", t.Running)
 	if t.PID > 0 {
 		fmt.Printf("PID:       %d\n", t.PID)

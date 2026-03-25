@@ -20,7 +20,6 @@ var tunnelCreateCmd = &cobra.Command{
 		local, _ := cmd.Flags().GetString("local")
 		subdomain, _ := cmd.Flags().GetString("subdomain")
 		url, _ := cmd.Flags().GetString("url")
-		private, _ := cmd.Flags().GetBool("private")
 		name, _ := cmd.Flags().GetString("name")
 
 		if local == "" {
@@ -33,7 +32,7 @@ var tunnelCreateCmd = &cobra.Command{
 			return output.PrintError("Cannot use both --subdomain and --url")
 		}
 
-		return handleTunnelCreate(local, subdomain, url, private, name)
+		return handleTunnelCreate(local, subdomain, url, name)
 	},
 }
 
@@ -91,7 +90,6 @@ func init() {
 	tunnelCreateCmd.Flags().StringP("local", "l", "", "Local service address (e.g., localhost:5000)")
 	tunnelCreateCmd.Flags().StringP("subdomain", "s", "", "Subdomain under root domain")
 	tunnelCreateCmd.Flags().StringP("url", "u", "", "Custom domain")
-	tunnelCreateCmd.Flags().BoolP("private", "p", false, "Private tunnel (reserved)")
 	tunnelCreateCmd.Flags().String("name", "", "Custom tunnel name")
 
 	// tunnel start flags
@@ -113,9 +111,9 @@ func init() {
 	tunnelCmd.AddCommand(tunnelDeleteCmd)
 }
 
-func handleTunnelCreate(local, subdomain, url string, private bool, name string) error {
+func handleTunnelCreate(local, subdomain, url string, name string) error {
 	manager := tunnel.NewManager()
-	t, err := manager.Create(local, subdomain, url, private, name)
+	t, err := manager.Create(local, subdomain, url, name)
 	if err != nil {
 		return output.PrintError(fmt.Sprintf("Failed to create tunnel: %v", err))
 	}

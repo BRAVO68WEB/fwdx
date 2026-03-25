@@ -5,6 +5,8 @@ package tests
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"io"
 	"net"
@@ -18,20 +20,22 @@ import (
 )
 
 const (
-	testClientToken = "e2e-client-token"
-	testAdminToken  = "e2e-admin-token"
-	testHostname    = "tunnel.example.com"
+	testHostname = "tunnel.example.com"
 )
 
 // testEnv holds a running gRPC + web server and shared registry/domains for e2e tests.
 type testEnv struct {
-	Reg        *server.Registry
-	Domains    *DomainStore
-	GrpcAddr   string
-	WebURL     string
-	grpcLn     net.Listener
-	webSrv     *httptest.Server
-	cancelGrpc context.CancelFunc
+	Reg              *server.Registry
+	Domains          *DomainStore
+	Store            *server.Store
+	Auth             *server.AuthManager
+	AdminAccessToken string
+	AdminUserID      int64
+	GrpcAddr         string
+	WebURL           string
+	grpcLn           net.Listener
+	webSrv           *httptest.Server
+	cancelGrpc       context.CancelFunc
 }
 
 type DomainStore = server.DomainStore
@@ -40,6 +44,22 @@ func startTestEnv(t *testing.T) *testEnv {
 	t.Helper()
 	reg := server.NewRegistry()
 	domains := server.NewDomainStore(t.TempDir())
+	store, err := server.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	auth, err := server.NewAuthManager(context.Background(), server.Config{Hostname: testHostname}, store, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	adminAccessToken, _, user, err := auth.IssueSessionForClaims(context.Background(), server.OIDCClaims{
+		Subject:     "admin-subject",
+		Email:       "admin@example.com",
+		DisplayName: "Admin User",
+	}, "admin")
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	grpcLn, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -47,7 +67,7 @@ func startTestEnv(t *testing.T) *testEnv {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
-		_ = server.RunGrpcServer(grpcLn, reg, testClientToken, domains.List, testHostname, false, "", "")
+		_ = server.RunGrpcServer(grpcLn, reg, domains.List, testHostname, false, "", "", store)
 		<-ctx.Done()
 	}()
 
@@ -55,7 +75,7 @@ func startTestEnv(t *testing.T) *testEnv {
 	webSrv := httptest.NewServer(proxyHandler)
 
 	env := &testEnv{
-		Reg: reg, Domains: domains,
+		Reg: reg, Domains: domains, Store: store, Auth: auth, AdminAccessToken: adminAccessToken, AdminUserID: user.ID,
 		GrpcAddr:   grpcLn.Addr().String(),
 		WebURL:     webSrv.URL,
 		grpcLn:     grpcLn,
@@ -66,8 +86,32 @@ func startTestEnv(t *testing.T) *testEnv {
 		cancel()
 		grpcLn.Close()
 		webSrv.Close()
+		store.Close()
 	})
 	return env
+}
+
+func newAdminSession(t *testing.T) (*server.Store, *server.AuthManager, string) {
+	t.Helper()
+	store, err := server.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	auth, err := server.NewAuthManager(context.Background(), server.Config{Hostname: testHostname}, store, false)
+	if err != nil {
+		store.Close()
+		t.Fatal(err)
+	}
+	raw, _, _, err := auth.IssueSessionForClaims(context.Background(), server.OIDCClaims{
+		Subject:     "admin-subject",
+		Email:       "admin@example.com",
+		DisplayName: "Admin User",
+	}, "admin")
+	if err != nil {
+		store.Close()
+		t.Fatal(err)
+	}
+	return store, auth, raw
 }
 
 // adminReq performs an admin API request (path must start with /admin/).
@@ -92,14 +136,39 @@ func (e *testEnv) adminReq(method, path string, body []byte, token string) (*htt
 }
 
 // runTunnel connects a tunnel in the background; cancel the returned context to disconnect.
-func (e *testEnv) runTunnel(ctx context.Context, hostname, localURL string) (context.CancelFunc, chan struct{}) {
+func (e *testEnv) runTunnel(ctx context.Context, name, hostname, localURL string) (context.CancelFunc, chan struct{}) {
+	token := e.provisionAgentAndTunnel(ctx, name, hostname)
 	done := make(chan struct{})
 	tunnelCtx, cancel := context.WithCancel(ctx)
 	go func() {
-		_ = tunnel.Connect(tunnelCtx, "http://"+e.GrpcAddr, testClientToken, hostname, localURL, false)
+		_ = tunnel.Connect(tunnelCtx, "http://"+e.GrpcAddr, token, name, localURL, false)
 		close(done)
 	}()
 	return cancel, done
+}
+
+func (e *testEnv) provisionAgentAndTunnel(ctx context.Context, name, hostname string) string {
+	eName := name + "-agent"
+	token := "agent-token-" + name
+	agent, err := e.Store.CreateAgent(ctx, e.AdminUserID, eName, hashCredential(token))
+	if err != nil {
+		if existing, getErr := e.Store.GetAgentByName(ctx, eName); getErr == nil {
+			agent = existing
+		} else {
+			panic(err)
+		}
+	}
+	if _, err := e.Store.CreateTunnel(ctx, e.AdminUserID, name, hostname, "", agent.ID); err != nil {
+		if err := e.Store.AssignTunnelToAgent(ctx, name, agent.ID); err != nil {
+			panic(err)
+		}
+	}
+	return token
+}
+
+func hashCredential(raw string) string {
+	sum := sha256.Sum256([]byte(raw))
+	return hex.EncodeToString(sum[:])
 }
 
 // --- Proxy flows ---
@@ -155,7 +224,7 @@ func TestE2E_Proxy_SubdomainTunnel(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	_, done := env.runTunnel(ctx, "app."+testHostname, local.URL)
+	_, done := env.runTunnel(ctx, "app", "app."+testHostname, local.URL)
 	time.Sleep(200 * time.Millisecond)
 
 	req, _ := http.NewRequest(http.MethodGet, env.WebURL+"/foo?bar=baz", nil)
@@ -198,7 +267,7 @@ func TestE2E_Proxy_POSTWithBody(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	env.runTunnel(ctx, "api."+testHostname, local.URL)
+	env.runTunnel(ctx, "api", "api."+testHostname, local.URL)
 	time.Sleep(200 * time.Millisecond)
 
 	postBody := []byte(`{"key":"value"}`)
@@ -237,8 +306,8 @@ func TestE2E_Proxy_MultipleTunnels(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	env.runTunnel(ctx, "a."+testHostname, backendA.URL)
-	env.runTunnel(ctx, "b."+testHostname, backendB.URL)
+	env.runTunnel(ctx, "a", "a."+testHostname, backendA.URL)
+	env.runTunnel(ctx, "b", "b."+testHostname, backendB.URL)
 	time.Sleep(300 * time.Millisecond)
 
 	reqA, _ := http.NewRequest(http.MethodGet, env.WebURL+"/", nil)
@@ -273,7 +342,7 @@ func TestE2E_Proxy_AfterDisconnect(t *testing.T) {
 	defer local.Close()
 
 	ctx, cancel := context.WithCancel(context.Background())
-	env.runTunnel(ctx, "gone."+testHostname, local.URL)
+	env.runTunnel(ctx, "gone", "gone."+testHostname, local.URL)
 	time.Sleep(200 * time.Millisecond)
 
 	cancel()
@@ -297,8 +366,10 @@ func TestE2E_Proxy_AfterDisconnect(t *testing.T) {
 func TestE2E_Admin_Unauthorized(t *testing.T) {
 	reg := server.NewRegistry()
 	domains := server.NewDomainStore(t.TempDir())
+	store, auth, _ := newAdminSession(t)
+	defer store.Close()
 	mux := http.NewServeMux()
-	mux.Handle("/admin/", server.AdminRouter(testAdminToken, testHostname, reg, domains))
+	mux.Handle("/admin/", server.AdminRouter(testHostname, reg, domains, auth, nil, store))
 	mux.Handle("/", server.ProxyHandler(reg, testHostname))
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
@@ -318,8 +389,10 @@ func TestE2E_Admin_Unauthorized(t *testing.T) {
 func TestE2E_Admin_Info(t *testing.T) {
 	reg := server.NewRegistry()
 	domains := server.NewDomainStore(t.TempDir())
+	store, auth, raw := newAdminSession(t)
+	defer store.Close()
 	mux := http.NewServeMux()
-	mux.Handle("/admin/", server.AdminRouter(testAdminToken, testHostname, reg, domains))
+	mux.Handle("/admin/", server.AdminRouter(testHostname, reg, domains, auth, nil, store))
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
@@ -327,7 +400,7 @@ func TestE2E_Admin_Info(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	req.Header.Set("Authorization", "Bearer "+testAdminToken)
+	req.Header.Set("Authorization", "Bearer "+raw)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -349,14 +422,14 @@ func TestE2E_Admin_Tunnels_EmptyThenWithTunnel(t *testing.T) {
 	env := startTestEnv(t)
 	// Mount admin on same server
 	mux := http.NewServeMux()
-	mux.Handle("/admin/", server.AdminRouter(testAdminToken, testHostname, env.Reg, env.Domains))
+	mux.Handle("/admin/", server.AdminRouter(testHostname, env.Reg, env.Domains, env.Auth, nil, env.Store))
 	mux.Handle("/", server.ProxyHandler(env.Reg, testHostname))
 	// Replace env's web with this mux
 	env.webSrv.Close()
 	env.webSrv = httptest.NewServer(mux)
 	env.WebURL = env.webSrv.URL
 
-	resp, err := env.adminReq(http.MethodGet, "/admin/tunnels", nil, testAdminToken)
+	resp, err := env.adminReq(http.MethodGet, "/admin/tunnels", nil, env.AdminAccessToken)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -376,10 +449,10 @@ func TestE2E_Admin_Tunnels_EmptyThenWithTunnel(t *testing.T) {
 	defer local.Close()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	env.runTunnel(ctx, "admin-test."+testHostname, local.URL)
+	env.runTunnel(ctx, "admin-test", "admin-test."+testHostname, local.URL)
 	time.Sleep(200 * time.Millisecond)
 
-	resp2, err := env.adminReq(http.MethodGet, "/admin/tunnels", nil, testAdminToken)
+	resp2, err := env.adminReq(http.MethodGet, "/admin/tunnels", nil, env.AdminAccessToken)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -395,12 +468,14 @@ func TestE2E_Admin_Tunnels_EmptyThenWithTunnel(t *testing.T) {
 func TestE2E_Admin_Domains_ListAddDelete(t *testing.T) {
 	reg := server.NewRegistry()
 	domains := server.NewDomainStore(t.TempDir())
+	store, auth, raw := newAdminSession(t)
+	defer store.Close()
 	mux := http.NewServeMux()
-	mux.Handle("/admin/", server.AdminRouter(testAdminToken, testHostname, reg, domains))
+	mux.Handle("/admin/", server.AdminRouter(testHostname, reg, domains, auth, nil, store))
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 	base := srv.URL
-	auth := "Bearer " + testAdminToken
+	authHeader := "Bearer " + raw
 
 	// Unauthorized
 	resp, _ := http.Get(base + "/admin/domains")
@@ -411,7 +486,7 @@ func TestE2E_Admin_Domains_ListAddDelete(t *testing.T) {
 
 	// List empty
 	req, _ := http.NewRequest(http.MethodGet, base+"/admin/domains", nil)
-	req.Header.Set("Authorization", auth)
+	req.Header.Set("Authorization", authHeader)
 	resp, _ = http.DefaultClient.Do(req)
 	var list []string
 	json.NewDecoder(resp.Body).Decode(&list)
@@ -422,7 +497,7 @@ func TestE2E_Admin_Domains_ListAddDelete(t *testing.T) {
 
 	// Add
 	req, _ = http.NewRequest(http.MethodPost, base+"/admin/domains", bytes.NewReader([]byte(`{"domain":"custom.example.com"}`)))
-	req.Header.Set("Authorization", auth)
+	req.Header.Set("Authorization", authHeader)
 	req.Header.Set("Content-Type", "application/json")
 	resp, _ = http.DefaultClient.Do(req)
 	resp.Body.Close()
@@ -432,7 +507,7 @@ func TestE2E_Admin_Domains_ListAddDelete(t *testing.T) {
 
 	// List has one
 	req, _ = http.NewRequest(http.MethodGet, base+"/admin/domains", nil)
-	req.Header.Set("Authorization", auth)
+	req.Header.Set("Authorization", authHeader)
 	resp, _ = http.DefaultClient.Do(req)
 	json.NewDecoder(resp.Body).Decode(&list)
 	resp.Body.Close()
@@ -442,7 +517,7 @@ func TestE2E_Admin_Domains_ListAddDelete(t *testing.T) {
 
 	// Delete
 	req, _ = http.NewRequest(http.MethodDelete, base+"/admin/domains/custom.example.com", nil)
-	req.Header.Set("Authorization", auth)
+	req.Header.Set("Authorization", authHeader)
 	resp, _ = http.DefaultClient.Do(req)
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusNoContent {
@@ -451,7 +526,7 @@ func TestE2E_Admin_Domains_ListAddDelete(t *testing.T) {
 
 	// List empty again
 	req, _ = http.NewRequest(http.MethodGet, base+"/admin/domains", nil)
-	req.Header.Set("Authorization", auth)
+	req.Header.Set("Authorization", authHeader)
 	resp, _ = http.DefaultClient.Do(req)
 	json.NewDecoder(resp.Body).Decode(&list)
 	resp.Body.Close()
@@ -469,7 +544,8 @@ func TestE2E_Tunnel_WrongToken(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	err := tunnel.Connect(ctx, "http://"+env.GrpcAddr, "wrong-token", "app."+testHostname, local.URL, false)
+	env.provisionAgentAndTunnel(context.Background(), "app", "app."+testHostname)
+	err := tunnel.Connect(ctx, "http://"+env.GrpcAddr, "wrong-token", "app", local.URL, false)
 	if err == nil {
 		t.Fatal("expected error when token is wrong")
 	}
@@ -478,17 +554,17 @@ func TestE2E_Tunnel_WrongToken(t *testing.T) {
 	}
 }
 
-func TestE2E_Tunnel_CustomDomain_Forbidden(t *testing.T) {
+func TestE2E_Tunnel_UnassignedRejected(t *testing.T) {
 	env := startTestEnv(t)
 	local := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) }))
 	defer local.Close()
 
+	_ = env.provisionAgentAndTunnel(context.Background(), "restricted", "custom.example.com")
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	// custom.example.com is not a subdomain of testHostname and not in allowed list
-	err := tunnel.Connect(ctx, "http://"+env.GrpcAddr, testClientToken, "custom.example.com", local.URL, false)
+	err := tunnel.Connect(ctx, "http://"+env.GrpcAddr, "wrong-agent-token", "restricted", local.URL, false)
 	if err == nil {
-		t.Fatal("expected error when domain not allowed")
+		t.Fatal("expected error when agent is not assigned")
 	}
 }
 
@@ -506,7 +582,7 @@ func TestE2E_Tunnel_CustomDomain_Allowed(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	env.runTunnel(ctx, "custom.allowed.com", local.URL)
+	env.runTunnel(ctx, "custom-allowed", "custom.allowed.com", local.URL)
 	time.Sleep(200 * time.Millisecond)
 
 	req, _ := http.NewRequest(http.MethodGet, env.WebURL+"/", nil)
@@ -534,12 +610,12 @@ func TestE2E_Tunnel_HostnameConflictRejected(t *testing.T) {
 
 	ctxA, cancelA := context.WithCancel(context.Background())
 	defer cancelA()
-	env.runTunnel(ctxA, "dup."+testHostname, localA.URL)
+	env.runTunnel(ctxA, "dup", "dup."+testHostname, localA.URL)
 	time.Sleep(200 * time.Millisecond)
 
 	ctxB, cancelB := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancelB()
-	err := tunnel.Connect(ctxB, "http://"+env.GrpcAddr, testClientToken, "dup."+testHostname, localB.URL, false)
+	err := tunnel.Connect(ctxB, "http://"+env.GrpcAddr, "agent-token-dup", "dup", localB.URL, false)
 	if err == nil {
 		t.Fatal("expected hostname conflict error")
 	}
@@ -553,7 +629,7 @@ func TestE2E_Tunnel_HostnameConflictRejected(t *testing.T) {
 func TestE2E_FullFlow_ConnectProxyDisconnect(t *testing.T) {
 	env := startTestEnv(t)
 	mux := http.NewServeMux()
-	mux.Handle("/admin/", server.AdminRouter(testAdminToken, testHostname, env.Reg, env.Domains))
+	mux.Handle("/admin/", server.AdminRouter(testHostname, env.Reg, env.Domains, env.Auth, nil, env.Store))
 	mux.Handle("/", server.ProxyHandler(env.Reg, testHostname))
 	env.webSrv.Close()
 	env.webSrv = httptest.NewServer(mux)
@@ -563,7 +639,7 @@ func TestE2E_FullFlow_ConnectProxyDisconnect(t *testing.T) {
 	defer local.Close()
 
 	// No tunnels
-	resp, _ := env.adminReq(http.MethodGet, "/admin/tunnels", nil, testAdminToken)
+	resp, _ := env.adminReq(http.MethodGet, "/admin/tunnels", nil, env.AdminAccessToken)
 	var list map[string]string
 	json.NewDecoder(resp.Body).Decode(&list)
 	resp.Body.Close()
@@ -573,11 +649,11 @@ func TestE2E_FullFlow_ConnectProxyDisconnect(t *testing.T) {
 
 	// Connect
 	ctx, cancel := context.WithCancel(context.Background())
-	env.runTunnel(ctx, "full."+testHostname, local.URL)
+	env.runTunnel(ctx, "full", "full."+testHostname, local.URL)
 	time.Sleep(200 * time.Millisecond)
 
 	// Admin sees one tunnel
-	resp, _ = env.adminReq(http.MethodGet, "/admin/tunnels", nil, testAdminToken)
+	resp, _ = env.adminReq(http.MethodGet, "/admin/tunnels", nil, env.AdminAccessToken)
 	json.NewDecoder(resp.Body).Decode(&list)
 	resp.Body.Close()
 	if len(list) != 1 {
@@ -617,7 +693,7 @@ func TestE2E_FullFlow_ConnectProxyDisconnect(t *testing.T) {
 	}
 
 	// Admin tunnels list may still show the entry briefly until stream teardown completes
-	resp, _ = env.adminReq(http.MethodGet, "/admin/tunnels", nil, testAdminToken)
+	resp, _ = env.adminReq(http.MethodGet, "/admin/tunnels", nil, env.AdminAccessToken)
 	json.NewDecoder(resp.Body).Decode(&list)
 	resp.Body.Close()
 	if len(list) != 0 {

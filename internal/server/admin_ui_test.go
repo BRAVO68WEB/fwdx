@@ -5,7 +5,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -19,57 +18,80 @@ func noRedirectClient() *http.Client {
 	}
 }
 
-func loginAndGetCookie(t *testing.T, base string) *http.Cookie {
+func issueAdminCookie(t *testing.T, auth *AuthManager) *http.Cookie {
 	t.Helper()
-	form := url.Values{}
-	form.Set("token", "admin-secret")
-	resp, err := noRedirectClient().PostForm(base+"/admin/ui/login", form)
+	raw, expiresAt, _, err := auth.IssueSessionForClaims(context.Background(), OIDCClaims{
+		Subject:     "admin-subject",
+		Email:       "admin@example.com",
+		DisplayName: "Admin User",
+	}, "admin")
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusFound {
-		t.Fatalf("login status=%d want=302", resp.StatusCode)
-	}
-	for _, c := range resp.Cookies() {
-		if c.Name == adminSessionCookieName {
-			return c
-		}
-	}
-	t.Fatal("missing session cookie")
-	return nil
+	return &http.Cookie{Name: userSessionCookieName, Value: raw, Path: "/", Expires: expiresAt}
 }
 
-func TestAdminUI_LoginAndConfig(t *testing.T) {
+func TestAdminUI_LoginPage(t *testing.T) {
 	cfg := Config{
-		Hostname:    "tunnel.myweb.site",
-		WebPort:     8080,
-		GrpcPort:    4440,
-		ClientToken: "client-token-123456",
-		AdminToken:  "admin-secret",
+		Hostname:        "tunnel.myweb.site",
+		WebPort:         8080,
+		GrpcPort:        4440,
+		OIDCIssuer:      "https://issuer.example.com",
+		OIDCClientID:    "web-client",
+		OIDCRedirectURL: "https://tunnel.myweb.site/auth/oidc/callback",
 	}
 	reg := NewRegistry()
 	domains := NewDomainStore(t.TempDir())
 	stats := NewStatsStore()
-	ui := AdminUIRouter(cfg, reg, domains, stats, time.Now().Add(-2*time.Minute), false)
-	srv := httptest.NewServer(ui)
-	defer srv.Close()
-
-	// unauthorized -> redirect to login
-	resp, err := noRedirectClient().Get(srv.URL + "/admin/ui")
+	store, err := NewStore(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusFound {
-		t.Fatalf("expected redirect, got %d", resp.StatusCode)
+	defer store.Close()
+	ui := AdminUIRouter(cfg, reg, domains, stats, store, nil, time.Now().Add(-2*time.Minute), false)
+	srv := httptest.NewServer(ui)
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/admin/ui/login")
+	if err != nil {
+		t.Fatal(err)
 	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("login page status=%d", resp.StatusCode)
+	}
+	if !strings.Contains(string(body), "Continue with OIDC") {
+		t.Fatalf("expected oidc login button")
+	}
+}
 
-	sess := loginAndGetCookie(t, srv.URL)
+func TestAdminUI_ConfigWithSession(t *testing.T) {
+	cfg := Config{
+		Hostname: "tunnel.myweb.site",
+		WebPort:  8080,
+		GrpcPort: 4440,
+	}
+	reg := NewRegistry()
+	domains := NewDomainStore(t.TempDir())
+	stats := NewStatsStore()
+	store, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	auth, err := NewAuthManager(context.Background(), cfg, store, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ui := AdminUIRouter(cfg, reg, domains, stats, store, auth, time.Now().Add(-2*time.Minute), false)
+	srv := httptest.NewServer(ui)
+	defer srv.Close()
 
+	cookie := issueAdminCookie(t, auth)
 	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/admin/ui/config", nil)
-	req.AddCookie(sess)
-	resp, err = http.DefaultClient.Do(req)
+	req.AddCookie(cookie)
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -78,38 +100,43 @@ func TestAdminUI_LoginAndConfig(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("config status=%d", resp.StatusCode)
 	}
-	if !strings.Contains(string(body), "Client Token (non-admin)") {
-		t.Fatalf("config page missing token section")
+	if !strings.Contains(string(body), "Tunnel Runtime Auth") {
+		t.Fatalf("config page missing agent auth section")
 	}
-	if !strings.Contains(string(body), "clie...3456") {
-		t.Fatalf("masked token missing, body=%s", string(body))
+	if !strings.Contains(string(body), "Per-agent credential") {
+		t.Fatalf("agent auth mode missing, body=%s", string(body))
 	}
 }
 
 func TestAdminUI_DisconnectAndDomains(t *testing.T) {
 	cfg := Config{
-		Hostname:    "tunnel.myweb.site",
-		WebPort:     8080,
-		GrpcPort:    4440,
-		ClientToken: "client-token-123456",
-		AdminToken:  "admin-secret",
+		Hostname: "tunnel.myweb.site",
+		WebPort:  8080,
+		GrpcPort: 4440,
 	}
 	reg := NewRegistry()
 	reg.Register("app.tunnel.myweb.site", &mockConn{remoteAddr: "127.0.0.1:9999"})
 	domains := NewDomainStore(t.TempDir())
 	stats := NewStatsStore()
-	ui := AdminUIRouter(cfg, reg, domains, stats, time.Now(), false)
+	store, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	auth, err := NewAuthManager(context.Background(), cfg, store, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ui := AdminUIRouter(cfg, reg, domains, stats, store, auth, time.Now(), false)
 	srv := httptest.NewServer(ui)
 	defer srv.Close()
 
-	sess := loginAndGetCookie(t, srv.URL)
+	cookie := issueAdminCookie(t, auth)
 
-	// disconnect active tunnel
-	frm := url.Values{}
-	frm.Set("hostname", "app.tunnel.myweb.site")
-	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/admin/ui/tunnels/disconnect", strings.NewReader(frm.Encode()))
+	frm := strings.NewReader("hostname=app.tunnel.myweb.site")
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/admin/ui/tunnels/disconnect", frm)
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.AddCookie(sess)
+	req.AddCookie(cookie)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -122,12 +149,10 @@ func TestAdminUI_DisconnectAndDomains(t *testing.T) {
 		t.Fatal("expected tunnel disconnected")
 	}
 
-	// add domain
-	frm = url.Values{}
-	frm.Set("domain", "mycompany.com")
-	req, _ = http.NewRequest(http.MethodPost, srv.URL+"/admin/ui/domains/add", strings.NewReader(frm.Encode()))
+	frm = strings.NewReader("domain=mycompany.com")
+	req, _ = http.NewRequest(http.MethodPost, srv.URL+"/admin/ui/domains/add", frm)
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.AddCookie(sess)
+	req.AddCookie(cookie)
 	resp, err = http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -143,23 +168,29 @@ func TestAdminUI_DisconnectAndDomains(t *testing.T) {
 
 func TestAdminUI_EventsSSE(t *testing.T) {
 	cfg := Config{
-		Hostname:    "tunnel.myweb.site",
-		WebPort:     8080,
-		GrpcPort:    4440,
-		ClientToken: "client-token-123456",
-		AdminToken:  "admin-secret",
+		Hostname: "tunnel.myweb.site",
+		WebPort:  8080,
+		GrpcPort: 4440,
 	}
 	reg := NewRegistry()
 	domains := NewDomainStore(t.TempDir())
 	stats := NewStatsStore()
-	ui := AdminUIRouter(cfg, reg, domains, stats, time.Now(), false)
+	store, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	auth, err := NewAuthManager(context.Background(), cfg, store, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ui := AdminUIRouter(cfg, reg, domains, stats, store, auth, time.Now(), false)
 	srv := httptest.NewServer(ui)
 	defer srv.Close()
 
-	sess := loginAndGetCookie(t, srv.URL)
-
+	cookie := issueAdminCookie(t, auth)
 	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/admin/ui/events", nil)
-	req.AddCookie(sess)
+	req.AddCookie(cookie)
 	ctx, cancel := context.WithTimeout(context.Background(), 2500*time.Millisecond)
 	defer cancel()
 	req = req.WithContext(ctx)
@@ -178,5 +209,85 @@ func TestAdminUI_EventsSSE(t *testing.T) {
 	}
 	if n == 0 || !strings.Contains(string(buf[:n]), "event: stats_tick") {
 		t.Fatalf("expected SSE event, got %q", string(buf[:n]))
+	}
+}
+
+func TestAdminUI_TunnelDetailAndAccessUpdate(t *testing.T) {
+	cfg := Config{
+		Hostname: "tunnel.myweb.site",
+		WebPort:  8080,
+		GrpcPort: 4440,
+	}
+	reg := NewRegistry()
+	reg.Register("app.tunnel.myweb.site", &mockConn{remoteAddr: "127.0.0.1:9999"})
+	domains := NewDomainStore(t.TempDir())
+	stats := NewStatsStore()
+	store, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	auth, err := NewAuthManager(context.Background(), cfg, store, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	adminCookie := issueAdminCookie(t, auth)
+	created, err := store.CreateTunnel(context.Background(), 0, "app", "app.tunnel.myweb.site", "http://localhost:3000", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AddTunnelEvent(context.Background(), created.Hostname, "register", "connected"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.InsertRequestLog(context.Background(), RequestLogRecord{
+		TunnelID:  created.ID,
+		Hostname:  created.Hostname,
+		Timestamp: time.Now(),
+		Method:    http.MethodGet,
+		Host:      created.Hostname,
+		Path:      "/",
+		Status:    200,
+		LatencyMS: 10,
+		ClientIP:  "127.0.0.1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	ui := AdminUIRouter(cfg, reg, domains, stats, store, auth, time.Now(), false)
+	srv := httptest.NewServer(ui)
+	defer srv.Close()
+
+	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/admin/ui/tunnels/app", nil)
+	req.AddCookie(adminCookie)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("detail status=%d", resp.StatusCode)
+	}
+	if !strings.Contains(string(body), "Access Rules") || !strings.Contains(string(body), "Recent Events") {
+		t.Fatalf("detail page missing sections: %s", string(body))
+	}
+
+	form := strings.NewReader("auth_mode=basic_auth&basic_auth_username=demo&basic_auth_password=secret")
+	req, _ = http.NewRequest(http.MethodPost, srv.URL+"/admin/ui/tunnels/app/access", form)
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.AddCookie(adminCookie)
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("access update status=%d", resp.StatusCode)
+	}
+	rule, err := store.GetTunnelAccessRule(context.Background(), created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rule.AuthMode != "basic_auth" || rule.BasicAuthUsername != "demo" {
+		t.Fatalf("unexpected rule: %+v", rule)
 	}
 }

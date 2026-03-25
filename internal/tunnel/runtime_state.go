@@ -4,7 +4,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -78,6 +80,21 @@ func isPIDRunning(pid int) bool {
 	return p.Signal(syscall.Signal(0)) == nil
 }
 
+func processLooksLikeTunnel(pid int, name string) bool {
+	if pid <= 0 {
+		return false
+	}
+	out, err := exec.Command("ps", "-p", fmt.Sprintf("%d", pid), "-o", "args=").Output()
+	if err != nil {
+		return false
+	}
+	cmdline := strings.TrimSpace(string(out))
+	if cmdline == "" {
+		return false
+	}
+	return strings.Contains(cmdline, "tunnel") && strings.Contains(cmdline, "start") && strings.Contains(cmdline, name)
+}
+
 func runtimeStateIfRunning(name string) (*RuntimeState, bool) {
 	st, err := readRuntimeState(name)
 	if err != nil {
@@ -87,7 +104,15 @@ func runtimeStateIfRunning(name string) (*RuntimeState, bool) {
 		removeRuntimeState(name)
 		return nil, false
 	}
-	return st, true
+	if processLooksLikeTunnel(st.PID, name) {
+		return st, true
+	}
+	// Fresh runtime state can outlive exact command-line matching on some platforms.
+	if !st.StartedAt.IsZero() && time.Since(st.StartedAt) < 2*time.Minute {
+		return st, true
+	}
+	removeRuntimeState(name)
+	return nil, false
 }
 
 func stopPID(pid int, timeout time.Duration) error {

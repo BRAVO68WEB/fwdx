@@ -8,9 +8,9 @@ import (
 var version = "0.1.0"
 
 var rootCmd = &cobra.Command{
-	Use:   "fwdx",
-	Short: "Self-hosted tunneling CLI and server",
-	Long:  `fwdx runs a tunneling server (fwdx serve) and clients connect to expose local HTTP services by hostname.`,
+	Use:     "fwdx",
+	Short:   "Self-hosted tunneling CLI and server",
+	Long:    `fwdx runs a tunneling server (fwdx serve) and clients connect to expose local HTTP services by hostname.`,
 	Version: version,
 }
 
@@ -20,6 +20,10 @@ func Execute() error {
 
 func init() {
 	rootCmd.AddCommand(serveCmd)
+	rootCmd.AddCommand(loginCmd)
+	rootCmd.AddCommand(logoutCmd)
+	rootCmd.AddCommand(whoamiCmd)
+	rootCmd.AddCommand(agentCmd)
 	rootCmd.AddCommand(manageCmd)
 	rootCmd.AddCommand(domainsCmd)
 	rootCmd.AddCommand(tunnelCmd)

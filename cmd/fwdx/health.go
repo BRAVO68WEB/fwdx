@@ -21,8 +21,8 @@ func handleHealth() error {
 	if err != nil {
 		return output.PrintError("Failed to load config: " + err.Error())
 	}
-	if cfg.ServerURL == "" || cfg.Token == "" {
-		return output.PrintError("FWDX_SERVER and FWDX_TOKEN (or client.json) must be set")
+	if cfg.ServerURL == "" {
+		return output.PrintError("FWDX_SERVER (or client.json) must be set")
 	}
 
 	resp, err := http.Head(cfg.ServerURL)

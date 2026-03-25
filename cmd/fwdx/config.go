@@ -26,13 +26,26 @@ func handleConfig() error {
 	fmt.Println()
 	fmt.Printf("  Config dir:    %s\n", config.GetConfigDir())
 	fmt.Printf("  Server URL:    %s\n", cfg.ServerURL)
-	if cfg.Token != "" {
-		fmt.Printf("  Token:         %s...\n", maskToken(cfg.Token))
+	if cfg.AgentName != "" {
+		fmt.Printf("  Agent Name:    %s\n", cfg.AgentName)
 	} else {
-		fmt.Printf("  Token:         (not set)\n")
+		fmt.Printf("  Agent Name:    (not provisioned)\n")
+	}
+	if cfg.AgentToken != "" {
+		fmt.Printf("  Agent Token:   %s...\n", maskToken(cfg.AgentToken))
+	} else {
+		fmt.Printf("  Agent Token:   (not set)\n")
 	}
 	fmt.Printf("  Server host:   %s\n", cfg.ServerHostname)
 	fmt.Printf("  Tunnel port:   %d\n", cfg.TunnelPort)
+	if auth, err := config.LoadAuthSession(); err == nil {
+		fmt.Printf("  OIDC Subject:  %s\n", auth.Subject)
+		fmt.Printf("  OIDC Email:    %s\n", auth.Email)
+		fmt.Printf("  OIDC Role:     %s\n", auth.Role)
+		fmt.Printf("  Auth Expires:  %s\n", auth.ExpiresAt.Format("2006-01-02 15:04:05"))
+	} else {
+		fmt.Printf("  OIDC Session:  (not logged in)\n")
+	}
 	return nil
 }
 

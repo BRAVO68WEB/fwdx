@@ -5,8 +5,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
-	"os"
-	"strings"
 
 	"github.com/spf13/cobra"
 )
@@ -35,33 +33,23 @@ var manageDomainsListCmd = &cobra.Command{
 
 func init() {
 	manageCmd.PersistentFlags().String("server", "", "fwdx server URL (or FWDX_SERVER)")
-	manageCmd.PersistentFlags().String("admin-token", "", "Admin token (or FWDX_ADMIN_TOKEN)")
 
 	manageCmd.AddCommand(manageTunnelsCmd)
 	manageCmd.AddCommand(manageDomainsCmd)
 	manageDomainsCmd.AddCommand(manageDomainsListCmd)
 }
 
-func manageServerAndToken(cmd *cobra.Command) (base *url.URL, adminToken string, err error) {
+func manageServerAndToken(cmd *cobra.Command) (base *url.URL, accessToken string, err error) {
 	serverURL, _ := cmd.Flags().GetString("server")
-	if serverURL == "" {
-		serverURL = os.Getenv("FWDX_SERVER")
-	}
-	if serverURL == "" {
-		return nil, "", fmt.Errorf("server is required (--server or FWDX_SERVER)")
-	}
-	adminToken, _ = cmd.Flags().GetString("admin-token")
-	if adminToken == "" {
-		adminToken = os.Getenv("FWDX_ADMIN_TOKEN")
-	}
-	if adminToken == "" {
-		return nil, "", fmt.Errorf("admin-token is required (--admin-token or FWDX_ADMIN_TOKEN)")
-	}
-	base, err = url.Parse(strings.TrimSuffix(serverURL, "/"))
+	base, err = resolveServerBase(serverURL)
 	if err != nil {
 		return nil, "", err
 	}
-	return base, adminToken, nil
+	sess, err := requireAuthSession()
+	if err != nil {
+		return nil, "", err
+	}
+	return base, sess.AccessToken, nil
 }
 
 func runManageTunnels(cmd *cobra.Command, args []string) error {

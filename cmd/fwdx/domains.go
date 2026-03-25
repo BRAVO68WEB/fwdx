@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
-	"os"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -27,7 +26,6 @@ var domainsAddCmd = &cobra.Command{
 func init() {
 	domainsCmd.AddCommand(domainsAddCmd)
 	domainsAddCmd.Flags().String("server", "", "fwdx server URL (or FWDX_SERVER)")
-	domainsAddCmd.Flags().String("admin-token", "", "Admin token (or FWDX_ADMIN_TOKEN)")
 }
 
 func runDomainsAdd(cmd *cobra.Command, args []string) error {
@@ -37,24 +35,13 @@ func runDomainsAdd(cmd *cobra.Command, args []string) error {
 	}
 
 	serverURL, _ := cmd.Flags().GetString("server")
-	if serverURL == "" {
-		serverURL = os.Getenv("FWDX_SERVER")
-	}
-	if serverURL == "" {
-		return fmt.Errorf("server is required (--server or FWDX_SERVER)")
-	}
-
-	adminToken, _ := cmd.Flags().GetString("admin-token")
-	if adminToken == "" {
-		adminToken = os.Getenv("FWDX_ADMIN_TOKEN")
-	}
-	if adminToken == "" {
-		return fmt.Errorf("admin-token is required (--admin-token or FWDX_ADMIN_TOKEN)")
-	}
-
-	base, err := url.Parse(strings.TrimSuffix(serverURL, "/"))
+	base, err := resolveServerBase(serverURL)
 	if err != nil {
-		return fmt.Errorf("invalid server URL: %w", err)
+		return err
+	}
+	sess, err := requireAuthSession()
+	if err != nil {
+		return err
 	}
 
 	// POST /admin/domains
@@ -62,7 +49,7 @@ func runDomainsAdd(cmd *cobra.Command, args []string) error {
 	body, _ := json.Marshal(map[string]string{"domain": domain})
 	req, _ := http.NewRequest(http.MethodPost, domainsURL, bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+adminToken)
+	req.Header.Set("Authorization", "Bearer "+sess.AccessToken)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("add domain: %w", err)
@@ -75,7 +62,7 @@ func runDomainsAdd(cmd *cobra.Command, args []string) error {
 	// GET /admin/info for hostname
 	infoURL := base.ResolveReference(&url.URL{Path: "/admin/info"}).String()
 	req2, _ := http.NewRequest(http.MethodGet, infoURL, nil)
-	req2.Header.Set("Authorization", "Bearer "+adminToken)
+	req2.Header.Set("Authorization", "Bearer "+sess.AccessToken)
 	resp2, err := http.DefaultClient.Do(req2)
 	if err != nil {
 		return fmt.Errorf("get server info: %w", err)

@@ -1,10 +1,6 @@
 package server
 
 import (
-	"crypto/hmac"
-	"crypto/sha256"
-	"crypto/subtle"
-	"encoding/base64"
 	"fmt"
 	"html/template"
 	"net/http"
@@ -14,45 +10,46 @@ import (
 	"time"
 )
 
-const (
-	adminSessionCookieName = "fwdx_admin_session"
-	adminSessionTTL        = 12 * time.Hour
-)
-
 type adminUIServer struct {
 	cfg      Config
 	registry *Registry
 	domains  *DomainStore
 	stats    *StatsStore
+	store    *Store
+	auth     *AuthManager
 	started  time.Time
-	secure   bool
-	secret   []byte
 	tpl      *template.Template
 }
 
 type uiViewData struct {
-	Title    string
-	Page     string
-	Hostname string
-	Content  any
+	Title      string
+	Page       string
+	Hostname   string
+	UserEmail  string
+	UserName   string
+	UserRole   string
+	OIDCIssuer string
+	Content    any
 }
 
 type dashboardData struct {
 	ActiveCount int
-	Stats       []TunnelStats
+	Tunnels     []uiTunnelRow
 }
 
 type configData struct {
 	Hostname      string
 	WebPort       int
 	GrpcPort      int
-	ClientToken   string
-	MaskedToken   string
+	AgentAuthMode string
 	Uptime        string
 	ActiveTunnels int
 	ReqLimit      int64
 	MsgLimit      int
 	RespLimit     int64
+	OIDCIssuer    string
+	OIDCScopes    string
+	OIDCEnabled   bool
 }
 
 type healthData struct {
@@ -63,91 +60,71 @@ type healthData struct {
 	SSEInterval    string
 }
 
-// AdminUIRouter provides cookie-authenticated micro frontend under /admin/ui.
-func AdminUIRouter(cfg Config, registry *Registry, domains *DomainStore, stats *StatsStore, started time.Time, secureCookie bool) http.Handler {
+type logsData struct {
+	Hostname string
+	Logs     []RequestLogRecord
+}
+
+// AdminUIRouter provides OIDC-authenticated micro frontend under /admin/ui.
+func AdminUIRouter(cfg Config, registry *Registry, domains *DomainStore, stats *StatsStore, store *Store, auth *AuthManager, started time.Time, secureCookie bool) http.Handler {
 	if stats == nil {
 		stats = NewStatsStore()
-	}
-	secret := strings.TrimSpace(os.Getenv("FWDX_UI_SESSION_SECRET"))
-	if secret == "" {
-		secret = "fwdx-ui::" + cfg.AdminToken
 	}
 	s := &adminUIServer{
 		cfg:      cfg,
 		registry: registry,
 		domains:  domains,
 		stats:    stats,
+		store:    store,
+		auth:     auth,
 		started:  started,
-		secure:   secureCookie,
-		secret:   []byte(secret),
-		tpl:      template.Must(template.New("ui").Parse(adminUITemplates)),
+		tpl:      template.Must(template.New("ui").Parse(adminUITemplates + adminUITunnelTemplates)),
 	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/admin/ui/login", s.loginHandler)
-	mux.HandleFunc("/admin/ui/logout", s.requireAuth(s.logoutHandler))
-	mux.HandleFunc("/admin/ui/events", s.requireAuth(s.eventsHandler))
-	mux.HandleFunc("/admin/ui/tunnels/table", s.requireAuth(s.tunnelsTableHandler))
-	mux.HandleFunc("/admin/ui/tunnels/disconnect", s.requireAuth(s.disconnectHandler))
-	mux.HandleFunc("/admin/ui/domains/add", s.requireAuth(s.domainsAddHandler))
-	mux.HandleFunc("/admin/ui/domains/remove", s.requireAuth(s.domainsRemoveHandler))
-	mux.HandleFunc("/admin/ui/config", s.requireAuth(s.configPageHandler))
-	mux.HandleFunc("/admin/ui/domains", s.requireAuth(s.domainsPageHandler))
-	mux.HandleFunc("/admin/ui/health", s.requireAuth(s.healthPageHandler))
-	mux.HandleFunc("/admin/ui", s.requireAuth(s.dashboardHandler))
-	mux.HandleFunc("/admin/ui/", s.requireAuth(s.dashboardHandler))
+	mux.HandleFunc("/admin/ui/events", s.requireAdmin(s.eventsHandler))
+	mux.HandleFunc("/admin/ui/tunnels/", s.requireAdmin(s.tunnelRouteHandler))
+	mux.HandleFunc("/admin/ui/tunnels/table", s.requireAdmin(s.tunnelsTableHandler))
+	mux.HandleFunc("/admin/ui/tunnels/disconnect", s.requireAdmin(s.disconnectHandler))
+	mux.HandleFunc("/admin/ui/domains/add", s.requireAdmin(s.domainsAddHandler))
+	mux.HandleFunc("/admin/ui/domains/remove", s.requireAdmin(s.domainsRemoveHandler))
+	mux.HandleFunc("/admin/ui/config", s.requireAdmin(s.configPageHandler))
+	mux.HandleFunc("/admin/ui/domains", s.requireAdmin(s.domainsPageHandler))
+	mux.HandleFunc("/admin/ui/health", s.requireAdmin(s.healthPageHandler))
+	mux.HandleFunc("/admin/ui/logs", s.requireAdmin(s.logsPageHandler))
+	mux.HandleFunc("/admin/ui", s.requireAdmin(s.dashboardHandler))
+	mux.HandleFunc("/admin/ui/", s.requireAdmin(s.dashboardHandler))
 	return mux
 }
 
-func (s *adminUIServer) requireAuth(next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if !s.validateSessionCookie(r) {
-			if strings.EqualFold(r.Header.Get("HX-Request"), "true") {
-				w.Header().Set("HX-Redirect", "/admin/ui/login")
-				http.Error(w, "unauthorized", http.StatusUnauthorized)
-				return
-			}
-			http.Redirect(w, r, "/admin/ui/login", http.StatusFound)
-			return
+func (s *adminUIServer) requireAdmin(next http.HandlerFunc) http.HandlerFunc {
+	if s.auth == nil {
+		return func(w http.ResponseWriter, r *http.Request) {
+			http.Error(w, "oidc not configured", http.StatusServiceUnavailable)
 		}
-		next(w, r)
 	}
+	return s.auth.requireAdmin(next)
+}
+
+func (s *adminUIServer) currentAdmin(r *http.Request) *UserRecord {
+	if s.auth == nil {
+		return nil
+	}
+	user, _, _ := s.auth.requestUser(r.Context(), r)
+	return user
 }
 
 func (s *adminUIServer) loginHandler(w http.ResponseWriter, r *http.Request) {
-	switch r.Method {
-	case http.MethodGet:
-		s.render(w, "login", uiViewData{Title: "Admin Login", Page: "login", Hostname: s.cfg.Hostname})
-	case http.MethodPost:
-		_ = r.ParseForm()
-		token := strings.TrimSpace(r.FormValue("token"))
-		if subtle.ConstantTimeCompare([]byte(token), []byte(s.cfg.AdminToken)) != 1 {
-			http.Error(w, "invalid admin token", http.StatusUnauthorized)
-			return
-		}
-		s.setSessionCookie(w)
-		http.Redirect(w, r, "/admin/ui", http.StatusFound)
-	default:
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-	}
-}
-
-func (s *adminUIServer) logoutHandler(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
+	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	http.SetCookie(w, &http.Cookie{
-		Name:     adminSessionCookieName,
-		Value:    "",
-		Path:     "/admin/ui",
-		Expires:  time.Unix(0, 0),
-		MaxAge:   -1,
-		HttpOnly: true,
-		Secure:   s.secure,
-		SameSite: http.SameSiteLaxMode,
-	})
-	http.Redirect(w, r, "/admin/ui/login", http.StatusFound)
+	if strings.TrimSpace(s.cfg.OIDCIssuer) == "" {
+		http.Error(w, "oidc not configured", http.StatusServiceUnavailable)
+		return
+	}
+	s.render(w, "login", uiViewData{Title: "Sign In", Page: "login", Hostname: s.cfg.Hostname, OIDCIssuer: s.cfg.OIDCIssuer})
 }
 
 func (s *adminUIServer) dashboardHandler(w http.ResponseWriter, r *http.Request) {
@@ -155,12 +132,17 @@ func (s *adminUIServer) dashboardHandler(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	data := dashboardData{ActiveCount: len(s.registry.List()), Stats: s.stats.Snapshot(s.registry.List())}
+	user := s.currentAdmin(r)
+	data, err := s.dashboardData(r.Context(), user)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 	if isHX(r) {
 		s.render(w, "dashboard_content", data)
 		return
 	}
-	s.render(w, "layout", uiViewData{Title: "Dashboard", Page: "dashboard", Hostname: s.cfg.Hostname, Content: data})
+	s.render(w, "layout", s.viewData("Dashboard", "dashboard", user, data))
 }
 
 func (s *adminUIServer) configPageHandler(w http.ResponseWriter, r *http.Request) {
@@ -172,19 +154,22 @@ func (s *adminUIServer) configPageHandler(w http.ResponseWriter, r *http.Request
 		Hostname:      s.cfg.Hostname,
 		WebPort:       s.cfg.WebPort,
 		GrpcPort:      s.cfg.GrpcPort,
-		ClientToken:   s.cfg.ClientToken,
-		MaskedToken:   maskTokenValue(s.cfg.ClientToken),
+		AgentAuthMode: "Per-agent credential",
 		Uptime:        time.Since(s.started).Round(time.Second).String(),
 		ActiveTunnels: len(s.registry.List()),
 		ReqLimit:      maxRequestBodyBytes(),
 		MsgLimit:      maxProxyBodyBytes(),
 		RespLimit:     s.maxResponseLimit(),
+		OIDCIssuer:    s.cfg.OIDCIssuer,
+		OIDCScopes:    strings.Join(s.cfg.OIDCScopes, ", "),
+		OIDCEnabled:   s.auth != nil && s.auth.OIDCEnabled(),
 	}
 	if isHX(r) {
 		s.render(w, "config_content", d)
 		return
 	}
-	s.render(w, "layout", uiViewData{Title: "Config", Page: "config", Hostname: s.cfg.Hostname, Content: d})
+	user := s.currentAdmin(r)
+	s.render(w, "layout", s.viewData("Config", "config", user, d))
 }
 
 func (s *adminUIServer) domainsPageHandler(w http.ResponseWriter, r *http.Request) {
@@ -197,7 +182,8 @@ func (s *adminUIServer) domainsPageHandler(w http.ResponseWriter, r *http.Reques
 		s.render(w, "domains_content", d)
 		return
 	}
-	s.render(w, "layout", uiViewData{Title: "Domains", Page: "domains", Hostname: s.cfg.Hostname, Content: d})
+	user := s.currentAdmin(r)
+	s.render(w, "layout", s.viewData("Domains", "domains", user, d))
 }
 
 func (s *adminUIServer) domainsAddHandler(w http.ResponseWriter, r *http.Request) {
@@ -252,7 +238,38 @@ func (s *adminUIServer) healthPageHandler(w http.ResponseWriter, r *http.Request
 		s.render(w, "health_content", d)
 		return
 	}
-	s.render(w, "layout", uiViewData{Title: "Health", Page: "health", Hostname: s.cfg.Hostname, Content: d})
+	user := s.currentAdmin(r)
+	s.render(w, "layout", s.viewData("Health", "health", user, d))
+}
+
+func (s *adminUIServer) logsPageHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.store == nil {
+		http.Error(w, "store unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	hostname := strings.TrimSpace(strings.ToLower(r.URL.Query().Get("hostname")))
+	if hostname == "" {
+		for h := range s.registry.List() {
+			hostname = h
+			break
+		}
+	}
+	logs, err := s.store.ListRequestLogs(r.Context(), hostname, 100)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	d := logsData{Hostname: hostname, Logs: logs}
+	if isHX(r) {
+		s.render(w, "logs_content", d)
+		return
+	}
+	user := s.currentAdmin(r)
+	s.render(w, "layout", s.viewData("Logs", "logs", user, d))
 }
 
 func (s *adminUIServer) tunnelsTableHandler(w http.ResponseWriter, r *http.Request) {
@@ -260,7 +277,13 @@ func (s *adminUIServer) tunnelsTableHandler(w http.ResponseWriter, r *http.Reque
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	s.render(w, "tunnels_table", s.stats.Snapshot(s.registry.List()))
+	user := s.currentAdmin(r)
+	rows, err := s.tunnelRows(r.Context(), user)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	s.render(w, "tunnels_table", rows)
 }
 
 func (s *adminUIServer) disconnectHandler(w http.ResponseWriter, r *http.Request) {
@@ -306,6 +329,7 @@ func (s *adminUIServer) eventsHandler(w http.ResponseWriter, r *http.Request) {
 			_, _ = fmt.Fprintf(w, "event: stats_tick\ndata: {\"ts\":%q}\n\n", now.UTC().Format(time.RFC3339))
 			_, _ = fmt.Fprintf(w, "event: tunnels_update\ndata: {}\n\n")
 			_, _ = fmt.Fprintf(w, "event: health_update\ndata: {}\n\n")
+			_, _ = fmt.Fprintf(w, "event: logs_update\ndata: {}\n\n")
 			flusher.Flush()
 		}
 	}
@@ -316,58 +340,14 @@ func (s *adminUIServer) render(w http.ResponseWriter, name string, data any) {
 	_ = s.tpl.ExecuteTemplate(w, name, data)
 }
 
-func (s *adminUIServer) setSessionCookie(w http.ResponseWriter) {
-	payload := fmt.Sprintf("%d:%d", time.Now().Unix(), time.Now().Add(adminSessionTTL).Unix())
-	payloadB64 := base64.RawURLEncoding.EncodeToString([]byte(payload))
-	sig := hmacSHA256(s.secret, payloadB64)
-	val := payloadB64 + "." + base64.RawURLEncoding.EncodeToString(sig)
-	http.SetCookie(w, &http.Cookie{
-		Name:     adminSessionCookieName,
-		Value:    val,
-		Path:     "/admin/ui",
-		HttpOnly: true,
-		Secure:   s.secure,
-		SameSite: http.SameSiteLaxMode,
-		Expires:  time.Now().Add(adminSessionTTL),
-	})
-}
-
-func (s *adminUIServer) validateSessionCookie(r *http.Request) bool {
-	c, err := r.Cookie(adminSessionCookieName)
-	if err != nil {
-		return false
+func (s *adminUIServer) viewData(title, page string, user *UserRecord, content any) uiViewData {
+	v := uiViewData{Title: title, Page: page, Hostname: s.cfg.Hostname, OIDCIssuer: s.cfg.OIDCIssuer, Content: content}
+	if user != nil {
+		v.UserEmail = user.Email
+		v.UserName = user.DisplayName
+		v.UserRole = user.Role
 	}
-	parts := strings.Split(c.Value, ".")
-	if len(parts) != 2 {
-		return false
-	}
-	want := hmacSHA256(s.secret, parts[0])
-	got, err := base64.RawURLEncoding.DecodeString(parts[1])
-	if err != nil {
-		return false
-	}
-	if !hmac.Equal(want, got) {
-		return false
-	}
-	payload, err := base64.RawURLEncoding.DecodeString(parts[0])
-	if err != nil {
-		return false
-	}
-	p := strings.Split(string(payload), ":")
-	if len(p) != 2 {
-		return false
-	}
-	expUnix, err := strconv.ParseInt(p[1], 10, 64)
-	if err != nil {
-		return false
-	}
-	return time.Now().Before(time.Unix(expUnix, 0))
-}
-
-func hmacSHA256(secret []byte, msg string) []byte {
-	m := hmac.New(sha256.New, secret)
-	_, _ = m.Write([]byte(msg))
-	return m.Sum(nil)
+	return v
 }
 
 func isHX(r *http.Request) bool {
@@ -417,10 +397,10 @@ var adminUITemplates = `
     table { width:100%; border-collapse: collapse; background:#fff; border-radius:10px; overflow:hidden; }
     th, td { text-align:left; padding:10px; border-bottom:1px solid #e2e8f0; font-size: 14px; }
     .muted { color:#64748b; font-size:12px; }
-    .row { display:flex; gap:12px; flex-wrap: wrap; }
+    .topbar { display:flex; justify-content:space-between; align-items:center; gap:12px; margin-bottom:12px; }
     .btn { border:0; border-radius:8px; padding:8px 10px; background:#1d4ed8; color:#fff; cursor:pointer; }
     .btn.red { background:#b91c1c; }
-    input, select { border:1px solid #cbd5e1; border-radius:8px; padding:8px; }
+    input { border:1px solid #cbd5e1; border-radius:8px; padding:8px; }
   </style>
 </head>
 <body>
@@ -431,17 +411,23 @@ var adminUITemplates = `
       <a href="/admin/ui/config" class="{{if eq .Page "config"}}active{{end}}" hx-get="/admin/ui/config" hx-target="#content" hx-push-url="true">Config</a>
       <a href="/admin/ui/domains" class="{{if eq .Page "domains"}}active{{end}}" hx-get="/admin/ui/domains" hx-target="#content" hx-push-url="true">Domains</a>
       <a href="/admin/ui/health" class="{{if eq .Page "health"}}active{{end}}" hx-get="/admin/ui/health" hx-target="#content" hx-push-url="true">Health</a>
-      <form method="post" action="/admin/ui/logout" style="margin-top:16px;">
+      <a href="/admin/ui/logs" class="{{if eq .Page "logs"}}active{{end}}" hx-get="/admin/ui/logs" hx-target="#content" hx-push-url="true">Logs</a>
+      <form method="post" action="/auth/oidc/logout" style="margin-top:16px;">
         <button class="btn red" type="submit">Logout</button>
       </form>
     </nav>
     <main>
-      <div class="muted">Server: {{.Hostname}}</div>
-      <div id="content">
+      <div class="topbar">
+        <div class="muted">Server: {{.Hostname}}{{if .OIDCIssuer}} | OIDC: {{.OIDCIssuer}}{{end}}</div>
+        <div class="muted">{{if .UserName}}{{.UserName}}{{else}}{{.UserEmail}}{{end}}{{if .UserRole}} ({{.UserRole}}){{end}}</div>
+      </div>
+	      <div id="content">
         {{if eq .Page "dashboard"}}{{template "dashboard_content" .Content}}{{end}}
         {{if eq .Page "config"}}{{template "config_content" .Content}}{{end}}
         {{if eq .Page "domains"}}{{template "domains_content" .Content}}{{end}}
         {{if eq .Page "health"}}{{template "health_content" .Content}}{{end}}
+        {{if eq .Page "logs"}}{{template "logs_content" .Content}}{{end}}
+        {{if eq .Page "tunnel_detail"}}{{template "tunnel_detail_content" .Content}}{{end}}
       </div>
     </main>
   </div>
@@ -453,16 +439,26 @@ var adminUITemplates = `
         if (document.getElementById('tunnels-table')) {
           htmx.ajax('GET', '/admin/ui/tunnels/table', '#tunnels-table');
         }
+        if (window.location.pathname.indexOf('/admin/ui/tunnels/') === 0) {
+          var base = window.location.pathname;
+          if (document.getElementById('tunnel-status')) htmx.ajax('GET', base + '/status', '#tunnel-status');
+          if (document.getElementById('tunnel-events')) htmx.ajax('GET', base + '/events', '#tunnel-events');
+          if (document.getElementById('tunnel-request-logs')) htmx.ajax('GET', base + '/logs', '#tunnel-request-logs');
+        }
         if (window.location.pathname === '/admin/ui/health') {
           htmx.ajax('GET', '/admin/ui/health', '#content');
+        }
+        if (window.location.pathname === '/admin/ui/logs') {
+          htmx.ajax('GET', window.location.pathname + window.location.search, '#content');
         }
       }
       es.addEventListener('stats_tick', refresh);
       es.addEventListener('tunnels_update', refresh);
       es.addEventListener('health_update', refresh);
+      es.addEventListener('logs_update', refresh);
       es.onerror = function(){};
     })();
-    function toggleToken(btnId, fullId, shownId) {
+    function toggleToken(fullId, shownId) {
       var shown = document.getElementById(shownId);
       var full = document.getElementById(fullId);
       if (!shown || !full) return;
@@ -489,12 +485,12 @@ var adminUITemplates = `
 <html>
 <head><meta charset="utf-8"/><title>fwdx admin login</title></head>
 <body style="font-family:ui-sans-serif; background:#f8fafc; padding:40px;">
-  <form method="post" action="/admin/ui/login" style="max-width:360px; background:#fff; padding:16px; border-radius:10px;">
-    <h3>Admin Login</h3>
-    <p>Enter ADMIN token</p>
-    <input type="password" name="token" style="width:100%; padding:8px;" />
-    <button type="submit" style="margin-top:8px;">Login</button>
-  </form>
+  <div style="max-width:420px; background:#fff; padding:20px; border-radius:12px; box-shadow:0 1px 4px rgba(0,0,0,0.06);">
+    <h3>Sign In</h3>
+    <p>Admin access is authenticated through your OIDC provider.</p>
+    <p class="muted">Issuer: {{.OIDCIssuer}}</p>
+    <a href="/auth/oidc/login?redirect=/admin/ui" style="display:inline-block; padding:10px 14px; background:#1d4ed8; color:#fff; border-radius:8px; text-decoration:none;">Continue with OIDC</a>
+  </div>
 </body>
 </html>
 {{end}}
@@ -502,37 +498,38 @@ var adminUITemplates = `
 {{define "dashboard_content"}}
 <div class="card">
   <h2>Active Tunnels: {{.ActiveCount}}</h2>
-  <div id="tunnels-table">{{template "tunnels_table" .Stats}}</div>
+  <div id="tunnels-table">{{template "tunnels_table" .Tunnels}}</div>
 </div>
 {{end}}
 
 {{define "tunnels_table"}}
 <table>
   <thead>
-    <tr><th>Hostname</th><th>Active</th><th>Req</th><th>Err</th><th>In</th><th>Out</th><th>Last</th><th>Avg ms</th><th>Action</th></tr>
+    <tr><th>Name</th><th>Hostname</th><th>Desired</th><th>Actual</th><th>Agent</th><th>Owner</th><th>Req</th><th>Err</th><th>Last Seen</th><th>Action</th></tr>
   </thead>
   <tbody>
   {{range .}}
     <tr>
+      <td><a href="/admin/ui/tunnels/{{.Name}}">{{.Name}}</a></td>
       <td>{{.Hostname}}</td>
-      <td>{{if .Active}}yes{{else}}no{{end}}</td>
+      <td>{{.DesiredState}}</td>
+      <td>{{.ActualState}}</td>
+      <td>{{if .AssignedAgent}}{{.AssignedAgent}}{{else}}-{{end}}</td>
+      <td>{{if .OwnerEmail}}{{.OwnerEmail}}{{else}}user #{{.OwnerUserID}}{{end}}</td>
       <td>{{.Requests}}</td>
       <td>{{.Errors}}</td>
-      <td>{{.BytesIn}}</td>
-      <td>{{.BytesOut}}</td>
-      <td>{{.LastStatus}}</td>
-      <td>{{.LatencyAvgMs}}</td>
+      <td>{{.LastSeenLabel}}</td>
       <td>
         {{if .Active}}
         <form hx-post="/admin/ui/tunnels/disconnect" hx-target="#tunnels-table" hx-swap="innerHTML" onsubmit="return confirm('Disconnect {{.Hostname}}?')">
           <input type="hidden" name="hostname" value="{{.Hostname}}" />
           <button class="btn red" type="submit">Disconnect</button>
         </form>
-        {{else}}-{{end}}
+        {{else}}<a href="/admin/ui/tunnels/{{.Name}}">Open</a>{{end}}
       </td>
     </tr>
   {{else}}
-    <tr><td colspan="9" class="muted">No tunnel stats yet.</td></tr>
+    <tr><td colspan="10" class="muted">No tunnels yet.</td></tr>
   {{end}}
   </tbody>
 </table>
@@ -550,11 +547,14 @@ var adminUITemplates = `
   <p><b>gRPC Msg Limit:</b> {{.MsgLimit}} bytes</p>
   <p><b>Response Body Limit:</b> {{.RespLimit}} bytes</p>
   <hr/>
-  <h3>Client Token (non-admin)</h3>
-  <p id="client-token-shown" data-masked="{{.MaskedToken}}" data-revealed="0">{{.MaskedToken}}</p>
-  <input id="client-token-full" type="hidden" value="{{.ClientToken}}" />
-  <button type="button" class="btn" onclick="toggleToken('toggle-btn','client-token-full','client-token-shown')">Reveal / Hide</button>
-  <button type="button" class="btn" onclick="copyToken('client-token-full')">Copy</button>
+  <h3>OIDC</h3>
+  <p><b>Enabled:</b> {{if .OIDCEnabled}}yes{{else}}no{{end}}</p>
+  <p><b>Issuer:</b> {{.OIDCIssuer}}</p>
+  <p><b>Scopes:</b> {{.OIDCScopes}}</p>
+  <hr/>
+  <h3>Tunnel Runtime Auth</h3>
+  <p class="muted">Tunnel clients authenticate with server-issued agent credentials.</p>
+  <p><b>Mode:</b> {{.AgentAuthMode}}</p>
 </div>
 {{end}}
 
@@ -598,6 +598,34 @@ var adminUITemplates = `
   <p><b>Allowed Domains:</b> {{.AllowedDomains}}</p>
   <p><b>Recent Proxy Errors (5m):</b> {{.RecentErrors}}</p>
   <p><b>SSE Tick:</b> {{.SSEInterval}}</p>
+</div>
+{{end}}
+
+{{define "logs_content"}}
+<div class="card">
+  <h2>Request Logs</h2>
+  <p class="muted">Showing recent persisted logs{{if .Hostname}} for {{.Hostname}}{{end}}</p>
+  <table>
+    <thead>
+      <tr><th>Time</th><th>Method</th><th>Path</th><th>Status</th><th>Latency ms</th><th>Bytes In</th><th>Bytes Out</th><th>Error</th></tr>
+    </thead>
+    <tbody>
+    {{range .Logs}}
+      <tr>
+        <td>{{.Timestamp.Format "2006-01-02 15:04:05"}}</td>
+        <td>{{.Method}}</td>
+        <td>{{.Path}}</td>
+        <td>{{.Status}}</td>
+        <td>{{.LatencyMS}}</td>
+        <td>{{.BytesIn}}</td>
+        <td>{{.BytesOut}}</td>
+        <td>{{.ErrorText}}</td>
+      </tr>
+    {{else}}
+      <tr><td colspan="8" class="muted">No persisted request logs yet.</td></tr>
+    {{end}}
+    </tbody>
+  </table>
 </div>
 {{end}}
 `
