@@ -1,6 +1,6 @@
 import type { Config } from '@react-router/dev/config';
-import { glob } from 'node:fs/promises';
 import { createGetUrl, getSlugs } from 'fumadocs-core/source';
+import { glob } from 'tinyglobby';
 
 const getUrl = createGetUrl('/docs');
 
@@ -17,7 +17,9 @@ export default {
       if (!excluded.includes(path)) paths.push(path);
     }
 
-    for await (const entry of glob('**/*.mdx', { cwd: 'content/docs' })) {
+    const entries = await glob('**/*.mdx', { cwd: 'content/docs' });
+
+    for (const entry of entries) {
       const slugs = getSlugs(entry);
       paths.push(getUrl(slugs), `/llms.mdx/docs/${[...slugs, 'index.mdx'].join('/')}`);
     }
