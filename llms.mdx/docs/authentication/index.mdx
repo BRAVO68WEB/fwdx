@@ -1,0 +1,28 @@
+# Authentication (/docs/authentication)
+
+
+
+Authentication [#authentication]
+
+`fwdx` now has a split auth model:
+
+* humans authenticate with OIDC
+* tunnel runtimes authenticate with per-agent credentials
+
+Human auth [#human-auth]
+
+* Admin UI: OIDC authorization code flow with PKCE
+* CLI: OIDC device authorization flow via `fwdx login`
+
+Tunnel runtime auth [#tunnel-runtime-auth]
+
+Tunnel clients do not use a shared global runtime token anymore.
+
+* the server issues a credential to a named agent
+* tunnel definitions are stored on the server and assigned to an agent
+* the local client stores its assigned agent credential in `~/.fwdx/client.json`
+
+Pages [#pages]
+
+* [OIDC UI Login](/docs/authentication/oidc-ui)
+* [CLI Device Flow](/docs/authentication/device-flow)

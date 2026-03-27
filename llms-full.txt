@@ -1,0 +1,510 @@
+# gRPC Tunnel Design (/docs/architecture/grpc-tunnel)
+
+
+
+gRPC Tunnel Design [#grpc-tunnel-design]
+
+The current transport uses one long-lived gRPC stream per active tunnel.
+
+Benefits:
+
+* outbound-only client connectivity
+* low-latency server-to-client request dispatch
+* room for heartbeats and future stream extensions
+* simpler operator deployment than request polling
+
+Current limitations:
+
+* WebSocket support is still pending
+* tunnel metadata is not yet fully server-owned
+
+
+# Architecture / Spec (/docs/architecture)
+
+
+
+Architecture / Spec [#architecture--spec]
+
+The current implementation uses:
+
+* public HTTP ingress on the server
+* a gRPC tunnel stream from client to server
+* request forwarding over that stream
+* server-side admin APIs and UI
+
+Architecture Pages [#architecture-pages]
+
+* [Traffic Flow](/docs/architecture/traffic-flow)
+* [gRPC Tunnel Design](/docs/architecture/grpc-tunnel)
+* [Rewrite Direction](/docs/architecture/rewrite-direction)
+
+
+# Rewrite Direction (/docs/architecture/rewrite-direction)
+
+
+
+Rewrite Direction [#rewrite-direction]
+
+The rewrite target is a stronger tunnel platform with:
+
+* server-owned tunnel records
+* OIDC-based human authentication
+* separate agent credentials for machine tunnel registration
+* better observability and request logs
+* access controls at ingress
+* WebSocket support
+
+The current codebase now includes the first persistence foundation:
+
+* SQLite-backed tunnel records
+* persisted request logs
+* stronger client runtime-state cleanup
+
+
+# Traffic Flow (/docs/architecture/traffic-flow)
+
+
+
+Traffic Flow [#traffic-flow]
+
+Current flow:
+
+1. Client opens a gRPC stream to the server.
+2. Client registers a hostname.
+3. Browser sends a request to `https://<hostname>`.
+4. Server looks up the active tunnel.
+5. Server sends a proxied request over the stream.
+6. Client forwards that request to the local app.
+7. Client returns the response over the stream.
+8. Server returns that response to the browser.
+
+This model works behind NAT because the client initiates the outbound connection.
+
+
+# CLI Device Flow (/docs/authentication/device-flow)
+
+
+
+CLI Device Flow [#cli-device-flow]
+
+Log in from the CLI:
+
+```bash
+export FWDX_SERVER=https://tunnel.example.com
+fwdx login
+```
+
+The CLI prints:
+
+* verification URL
+* user code
+* direct verification URL when the provider exposes one
+
+After approval:
+
+```bash
+fwdx whoami
+```
+
+Management commands reuse the stored session:
+
+```bash
+fwdx manage tunnels --server https://tunnel.example.com
+fwdx domains add my.domain --server https://tunnel.example.com
+```
+
+The stored session lives at:
+
+```text
+~/.fwdx/auth.json
+```
+
+
+# Authentication (/docs/authentication)
+
+
+
+Authentication [#authentication]
+
+`fwdx` now has a split auth model:
+
+* humans authenticate with OIDC
+* tunnel runtimes authenticate with per-agent credentials
+
+Human auth [#human-auth]
+
+* Admin UI: OIDC authorization code flow with PKCE
+* CLI: OIDC device authorization flow via `fwdx login`
+
+Tunnel runtime auth [#tunnel-runtime-auth]
+
+Tunnel clients do not use a shared global runtime token anymore.
+
+* the server issues a credential to a named agent
+* tunnel definitions are stored on the server and assigned to an agent
+* the local client stores its assigned agent credential in `~/.fwdx/client.json`
+
+Pages [#pages]
+
+* [OIDC UI Login](/docs/authentication/oidc-ui)
+* [CLI Device Flow](/docs/authentication/device-flow)
+
+
+# OIDC UI Login (/docs/authentication/oidc-ui)
+
+
+
+OIDC UI Login [#oidc-ui-login]
+
+Required server settings:
+
+```bash
+export FWDX_OIDC_ISSUER=https://issuer.example.com
+export FWDX_OIDC_CLIENT_ID=fwdx-web
+export FWDX_OIDC_CLIENT_SECRET=your-secret
+export FWDX_OIDC_REDIRECT_URL=https://tunnel.example.com/auth/oidc/callback
+export FWDX_OIDC_ADMIN_EMAILS=admin@example.com
+```
+
+The redirect URL must point back to the `fwdx` server:
+
+```text
+https://tunnel.example.com/auth/oidc/callback
+```
+
+Once configured, visit:
+
+```text
+https://tunnel.example.com/admin/ui
+```
+
+The UI redirects to the OIDC provider and returns with a session cookie issued by `fwdx`.
+
+
+# CLI Usage (/docs/cli)
+
+
+
+CLI Usage [#cli-usage]
+
+The current CLI has four areas:
+
+* server startup
+* OIDC login
+* admin management
+* tunnel lifecycle
+
+Server [#server]
+
+```bash
+fwdx serve \
+  --hostname tunnel.example.com \
+  --oidc-issuer https://issuer.example.com \
+  --oidc-client-id fwdx-web \
+  --oidc-client-secret ... \
+  --oidc-redirect-url https://tunnel.example.com/auth/oidc/callback
+```
+
+Human auth [#human-auth]
+
+```bash
+fwdx login
+fwdx whoami
+fwdx logout
+```
+
+Management [#management]
+
+```bash
+fwdx manage tunnels --server https://tunnel.example.com
+fwdx manage domains list --server https://tunnel.example.com
+fwdx domains add my.domain --server https://tunnel.example.com
+```
+
+Tunnel runtime [#tunnel-runtime]
+
+```bash
+export FWDX_SERVER=https://tunnel.example.com
+
+fwdx tunnel create -l localhost:3000 -s app --name app
+fwdx tunnel start app
+fwdx tunnel stop app
+fwdx tunnel list
+fwdx logs app --follow
+```
+
+The CLI provisions an agent credential automatically on first tunnel create/start and stores it locally.
+
+
+# Deployment (/docs/deployment)
+
+
+
+Deployment [#deployment]
+
+The recommended deployment model is:
+
+1. `fwdx` server running locally on private ports
+2. nginx terminating TLS on `443` and `4443`
+3. wildcard DNS for `*.tunnel.example.com`
+
+Sections [#sections]
+
+* [nginx](/docs/deployment/nginx)
+* [systemd](/docs/deployment/systemd)
+* [TLS and DNS](/docs/deployment/tls-dns)
+
+
+# nginx (/docs/deployment/nginx)
+
+
+
+nginx [#nginx]
+
+The common layout is:
+
+* `443` -> fwdx web port
+* `4443` -> fwdx gRPC port
+
+If you use ingress IP allowlists, start the server with trusted proxy CIDRs so `fwdx` uses the real visitor IP instead of nginx's loopback address:
+
+```bash
+fwdx serve \
+  --trusted-proxy-cidrs 127.0.0.1/32,::1/128 \
+  ...
+```
+
+HTTPS vhost [#https-vhost]
+
+```nginx
+server {
+  listen 443 ssl http2;
+  listen [::]:443 ssl http2;
+  server_name tunnel.example.com *.tunnel.example.com;
+
+  ssl_certificate     /etc/letsencrypt/live/tunnel.example.com/fullchain.pem;
+  ssl_certificate_key /etc/letsencrypt/live/tunnel.example.com/privkey.pem;
+
+  location / {
+    proxy_pass http://127.0.0.1:4040;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_read_timeout 86400s;
+    proxy_send_timeout 86400s;
+  }
+}
+```
+
+gRPC stream block [#grpc-stream-block]
+
+```nginx
+stream {
+  server {
+    listen 4443 ssl;
+    listen [::]:4443 ssl;
+
+    ssl_certificate     /etc/letsencrypt/live/tunnel.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/tunnel.example.com/privkey.pem;
+    ssl_alpn h2;
+
+    proxy_pass 127.0.0.1:4440;
+    proxy_connect_timeout 10s;
+    proxy_timeout 86400s;
+  }
+}
+```
+
+
+# systemd (/docs/deployment/systemd)
+
+
+
+systemd [#systemd]
+
+Example service:
+
+```ini
+[Unit]
+Description=fwdx server
+After=network.target nginx.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/fwdx serve \
+  --hostname tunnel.example.com \
+  --oidc-issuer https://issuer.example.com \
+  --oidc-client-id fwdx-web \
+  --oidc-client-secret YOUR_OIDC_SECRET \
+  --oidc-redirect-url https://tunnel.example.com/auth/oidc/callback \
+  --oidc-admin-emails admin@example.com \
+  --web-port 4040 \
+  --grpc-port 4440 \
+  --data-dir /var/lib/fwdx
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Logs:
+
+```bash
+journalctl -u fwdx -f
+```
+
+
+# TLS and DNS (/docs/deployment/tls-dns)
+
+
+
+TLS and DNS [#tls-and-dns]
+
+DNS [#dns]
+
+You need:
+
+* `tunnel.example.com` -> server public IP
+* `*.tunnel.example.com` -> server public IP
+
+TLS [#tls]
+
+The certificate must cover:
+
+* `tunnel.example.com`
+* `*.tunnel.example.com`
+
+If nginx terminates TLS, fwdx itself can stay on plain local ports.
+
+
+# fwdx Docs (/docs)
+
+
+
+fwdx [#fwdx]
+
+`fwdx` is a self-hosted tunnel platform for exposing local HTTP services through your own domain.
+
+Documentation [#documentation]
+
+* [Installation](/docs/installation)
+* [CLI Usage](/docs/cli)
+* [Deployment](/docs/deployment)
+* [Authentication](/docs/authentication)
+* [Architecture / Spec](/docs/architecture)
+
+Current Product Scope [#current-product-scope]
+
+* gRPC-based tunnel transport
+* Nginx-friendly deployment model
+* Admin UI and management APIs
+* Detached client tunnel runtime
+* Tunnel request stats and persisted request logs
+
+Next Rewrite Direction [#next-rewrite-direction]
+
+The platform is being moved toward:
+
+* server-owned control-plane state
+* OIDC-based human authentication
+* separate machine credentials for client agents
+* stronger tunnel observability
+* WebSocket support
+
+
+# Client Install (/docs/installation/client)
+
+
+
+Client Install [#client-install]
+
+Install or build the same `fwdx` binary on the client machine.
+
+Set client configuration:
+
+```bash
+export FWDX_SERVER=https://tunnel.example.com
+export FWDX_TUNNEL_PORT=4443
+```
+
+Create and start a tunnel:
+
+```bash
+fwdx tunnel create -l localhost:5173 -s vite --name vite
+fwdx tunnel start vite
+```
+
+The first tunnel create/start on a machine provisions and stores a local agent credential in `~/.fwdx/client.json`.
+
+Detached mode:
+
+```bash
+fwdx tunnel start vite --detach
+fwdx logs vite --follow
+```
+
+
+# Installation (/docs/installation)
+
+
+
+Installation [#installation]
+
+`fwdx` has two sides:
+
+* a public server
+* one or more tunnel clients
+
+Requirements [#requirements]
+
+* Go `1.25+` to build from source
+* a Linux server with a public IP for the server side
+* a domain such as `tunnel.example.com`
+* TLS certificates for the public hostname
+
+Paths [#paths]
+
+* Server binary: `/usr/local/bin/fwdx`
+* Client config: `~/.fwdx/client.json`
+* Detached runtime state: `~/.fwdx/run`
+
+Next Steps [#next-steps]
+
+* [Install the server](/docs/installation/server)
+* [Install the client](/docs/installation/client)
+
+
+# Server Install (/docs/installation/server)
+
+
+
+Server Install [#server-install]
+
+Build from source:
+
+```bash
+git clone https://github.com/BRAVO68WEB/fwdx.git
+cd fwdx
+go build -o fwdx .
+sudo mv fwdx /usr/local/bin/
+```
+
+Run behind nginx:
+
+```bash
+fwdx serve \
+  --hostname tunnel.example.com \
+  --oidc-issuer https://issuer.example.com \
+  --oidc-client-id fwdx-web \
+  --oidc-client-secret YOUR_OIDC_SECRET \
+  --oidc-redirect-url https://tunnel.example.com/auth/oidc/callback \
+  --oidc-admin-emails admin@example.com \
+  --web-port 4040 \
+  --grpc-port 4440 \
+  --data-dir /var/lib/fwdx
+```
+
+The web port serves proxy traffic, admin UI, OIDC callback routes, and admin APIs. The gRPC port serves tunnel clients.

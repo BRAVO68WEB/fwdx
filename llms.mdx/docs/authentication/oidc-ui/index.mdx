@@ -1,0 +1,29 @@
+# OIDC UI Login (/docs/authentication/oidc-ui)
+
+
+
+OIDC UI Login [#oidc-ui-login]
+
+Required server settings:
+
+```bash
+export FWDX_OIDC_ISSUER=https://issuer.example.com
+export FWDX_OIDC_CLIENT_ID=fwdx-web
+export FWDX_OIDC_CLIENT_SECRET=your-secret
+export FWDX_OIDC_REDIRECT_URL=https://tunnel.example.com/auth/oidc/callback
+export FWDX_OIDC_ADMIN_EMAILS=admin@example.com
+```
+
+The redirect URL must point back to the `fwdx` server:
+
+```text
+https://tunnel.example.com/auth/oidc/callback
+```
+
+Once configured, visit:
+
+```text
+https://tunnel.example.com/admin/ui
+```
+
+The UI redirects to the OIDC provider and returns with a session cookie issued by `fwdx`.

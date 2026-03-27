@@ -1,0 +1,37 @@
+# CLI Device Flow (/docs/authentication/device-flow)
+
+
+
+CLI Device Flow [#cli-device-flow]
+
+Log in from the CLI:
+
+```bash
+export FWDX_SERVER=https://tunnel.example.com
+fwdx login
+```
+
+The CLI prints:
+
+* verification URL
+* user code
+* direct verification URL when the provider exposes one
+
+After approval:
+
+```bash
+fwdx whoami
+```
+
+Management commands reuse the stored session:
+
+```bash
+fwdx manage tunnels --server https://tunnel.example.com
+fwdx domains add my.domain --server https://tunnel.example.com
+```
+
+The stored session lives at:
+
+```text
+~/.fwdx/auth.json
+```

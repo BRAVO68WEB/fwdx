@@ -1,0 +1,20 @@
+# Rewrite Direction (/docs/architecture/rewrite-direction)
+
+
+
+Rewrite Direction [#rewrite-direction]
+
+The rewrite target is a stronger tunnel platform with:
+
+* server-owned tunnel records
+* OIDC-based human authentication
+* separate agent credentials for machine tunnel registration
+* better observability and request logs
+* access controls at ingress
+* WebSocket support
+
+The current codebase now includes the first persistence foundation:
+
+* SQLite-backed tunnel records
+* persisted request logs
+* stronger client runtime-state cleanup

@@ -1,0 +1,30 @@
+# Client Install (/docs/installation/client)
+
+
+
+Client Install [#client-install]
+
+Install or build the same `fwdx` binary on the client machine.
+
+Set client configuration:
+
+```bash
+export FWDX_SERVER=https://tunnel.example.com
+export FWDX_TUNNEL_PORT=4443
+```
+
+Create and start a tunnel:
+
+```bash
+fwdx tunnel create -l localhost:5173 -s vite --name vite
+fwdx tunnel start vite
+```
+
+The first tunnel create/start on a machine provisions and stores a local agent credential in `~/.fwdx/client.json`.
+
+Detached mode:
+
+```bash
+fwdx tunnel start vite --detach
+fwdx logs vite --follow
+```

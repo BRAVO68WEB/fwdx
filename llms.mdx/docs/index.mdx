@@ -1,0 +1,33 @@
+# fwdx Docs (/docs)
+
+
+
+fwdx [#fwdx]
+
+`fwdx` is a self-hosted tunnel platform for exposing local HTTP services through your own domain.
+
+Documentation [#documentation]
+
+* [Installation](/docs/installation)
+* [CLI Usage](/docs/cli)
+* [Deployment](/docs/deployment)
+* [Authentication](/docs/authentication)
+* [Architecture / Spec](/docs/architecture)
+
+Current Product Scope [#current-product-scope]
+
+* gRPC-based tunnel transport
+* Nginx-friendly deployment model
+* Admin UI and management APIs
+* Detached client tunnel runtime
+* Tunnel request stats and persisted request logs
+
+Next Rewrite Direction [#next-rewrite-direction]
+
+The platform is being moved toward:
+
+* server-owned control-plane state
+* OIDC-based human authentication
+* separate machine credentials for client agents
+* stronger tunnel observability
+* WebSocket support

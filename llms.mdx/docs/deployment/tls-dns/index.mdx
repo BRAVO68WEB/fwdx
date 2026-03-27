@@ -1,0 +1,21 @@
+# TLS and DNS (/docs/deployment/tls-dns)
+
+
+
+TLS and DNS [#tls-and-dns]
+
+DNS [#dns]
+
+You need:
+
+* `tunnel.example.com` -> server public IP
+* `*.tunnel.example.com` -> server public IP
+
+TLS [#tls]
+
+The certificate must cover:
+
+* `tunnel.example.com`
+* `*.tunnel.example.com`
+
+If nginx terminates TLS, fwdx itself can stay on plain local ports.

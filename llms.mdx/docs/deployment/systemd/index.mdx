@@ -1,0 +1,37 @@
+# systemd (/docs/deployment/systemd)
+
+
+
+systemd [#systemd]
+
+Example service:
+
+```ini
+[Unit]
+Description=fwdx server
+After=network.target nginx.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/fwdx serve \
+  --hostname tunnel.example.com \
+  --oidc-issuer https://issuer.example.com \
+  --oidc-client-id fwdx-web \
+  --oidc-client-secret YOUR_OIDC_SECRET \
+  --oidc-redirect-url https://tunnel.example.com/auth/oidc/callback \
+  --oidc-admin-emails admin@example.com \
+  --web-port 4040 \
+  --grpc-port 4440 \
+  --data-dir /var/lib/fwdx
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Logs:
+
+```bash
+journalctl -u fwdx -f
+```

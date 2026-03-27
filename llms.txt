@@ -1,0 +1,23 @@
+# Docs
+
+- [fwdx Docs](/docs): Self-hosted tunnel platform documentation for installation, CLI usage, deployment, and architecture.
+- Architecture / Spec: undefined
+  - [Architecture / Spec](/docs/architecture): Current tunnel flow and the rewrite direction toward a fuller control plane.
+  - [gRPC Tunnel Design](/docs/architecture/grpc-tunnel): Current gRPC stream design and why it replaced polling.
+  - [Rewrite Direction](/docs/architecture/rewrite-direction): Planned evolution toward a server-owned control plane and modern auth.
+  - [Traffic Flow](/docs/architecture/traffic-flow): How public requests reach the client-side local app.
+- Authentication: undefined
+  - [Authentication](/docs/authentication): OIDC-only human authentication and current tunnel runtime auth.
+  - [CLI Device Flow](/docs/authentication/device-flow): Use OIDC device flow for CLI access.
+  - [OIDC UI Login](/docs/authentication/oidc-ui): Configure browser-based OIDC admin login.
+- CLI Usage: undefined
+  - [CLI Usage](/docs/cli): Core commands for login, management, tunnel runtime, and diagnostics.
+- Deployment: undefined
+  - [Deployment](/docs/deployment): Deploy fwdx with nginx, TLS, and systemd.
+  - [nginx](/docs/deployment/nginx): Reverse proxy public HTTPS and tunnel gRPC traffic to the fwdx server.
+  - [systemd](/docs/deployment/systemd): Run the fwdx server as a long-lived Linux service.
+  - [TLS and DNS](/docs/deployment/tls-dns): DNS records and certificates required for public tunnel routing.
+- Installation: undefined
+  - [Installation](/docs/installation): Install the fwdx server, client, and supporting requirements.
+  - [Client Install](/docs/installation/client): Configure and run a local fwdx tunnel client.
+  - [Server Install](/docs/installation/server): Build and install the fwdx server binary.

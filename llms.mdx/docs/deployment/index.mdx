@@ -1,0 +1,17 @@
+# Deployment (/docs/deployment)
+
+
+
+Deployment [#deployment]
+
+The recommended deployment model is:
+
+1. `fwdx` server running locally on private ports
+2. nginx terminating TLS on `443` and `4443`
+3. wildcard DNS for `*.tunnel.example.com`
+
+Sections [#sections]
+
+* [nginx](/docs/deployment/nginx)
+* [systemd](/docs/deployment/systemd)
+* [TLS and DNS](/docs/deployment/tls-dns)
