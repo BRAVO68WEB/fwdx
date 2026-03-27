@@ -1,0 +1,8 @@
+FROM alpine:latest
+
+RUN apk --no-cache add ca-certificates
+
+COPY fwdx /usr/local/bin/fwdx
+
+ENTRYPOINT ["fwdx"]
+
