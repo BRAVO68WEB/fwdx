@@ -9,5 +9,5 @@ export default defineConfig({
   resolve: {
     tsconfigPaths: true,
   },
-  base: "/fwdx"
+  base: "/fwdx/"
 });
